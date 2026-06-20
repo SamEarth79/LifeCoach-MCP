@@ -41,3 +41,53 @@ too. Server was torn down after the check.
 
 Result: 9/9 tests passing (6 unit, 3 feature), all four acceptance criteria
 verified. Verdict: PASS.
+
+## LFC-STORY-002
+
+Tested the Alembic scaffold (`migrations/env.py`, `alembic.ini`) and the
+`create_users_table` migration (`16b5eb4c9d06`) against all four
+acceptance criteria.
+
+What was tested and why:
+
+- AC1 (DB URL sourced from app settings, not hardcoded): wrote
+  `tests/unit/test_migrations_env.py`, which loads the real `env.py` module
+  with `alembic.context` mocked, and asserts `config.set_main_option`
+  receives the exact value of `get_settings().database_url`. A second test
+  changes `DATABASE_URL` in the environment and confirms the value Alembic
+  receives changes accordingly — ruling out a hardcoded or cached URL
+  anywhere in the wiring.
+- AC2 (users table columns) and AC3 (RLS + policies): no live database was
+  available in this environment (no Docker daemon running, no local
+  Postgres/`psql` installed), and the migration's `auth.users` FK
+  reference is Supabase-managed and wouldn't exist in a plain Postgres
+  without a stub schema anyway. Instead of skipping these ACs, ran
+  `alembic upgrade head --sql` — Alembic's offline mode, which generates
+  the exact SQL it would execute without touching a database — and
+  inspected the output directly. It matches the story's column spec and
+  RLS/policy definitions exactly.
+- AC4 (clean downgrade): ran `alembic downgrade 16b5eb4c9d06:base --sql`
+  and confirmed the generated SQL drops both policies, then the table, in
+  the correct order, with nothing left over.
+- E2E (Playwright) was explicitly skipped: this is a backend/infra-only
+  story (a database migration), with no UI, no page, and no browser flow
+  to test. Per `rules/testing.md`, E2E is only required for stories that
+  change user-facing behavior — this is the kind of story the rule's own
+  carve-out example describes.
+
+Important caveat: none of AC2/AC3/AC4 were verified against a real,
+running database. The `--sql` dry-run proves the migration is internally
+consistent and generates correct-looking DDL, but cannot catch issues that
+only manifest at execution time against a real `auth.users` table and a
+real Postgres RLS engine (e.g. FK resolution against actual rows, `auth.uid()`
+behavior under a real session). This is a genuine gap, not a fabricated
+pass — it should be re-verified against a real Supabase/Postgres instance
+before being trusted in production. Also note: `alembic`/`sqlalchemy` were
+declared in `pyproject.toml` but were not yet installed in the project's
+venv; ran `pip install -e .` to install them before testing (no version
+conflicts).
+
+Result: 2/2 new unit tests passing, full suite 11/11 passing. SQL-level ACs
+verified via dry-run generation only, not live execution. Verdict: PASS
+WITH CAVEATS (see test-results.md for the full environment-limitation
+writeup).
