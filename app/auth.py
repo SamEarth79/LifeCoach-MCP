@@ -44,17 +44,11 @@ def _decode_token(token: str) -> dict:
             algorithms=["ES256"],
             audience="authenticated",
         )
-    except jwt.ExpiredSignatureError:
-        logger.warning("JWT verification failed: expired token")
-        raise _unauthorized()
-    except jwt.InvalidSignatureError:
-        logger.warning("JWT verification failed: invalid signature")
-        raise _unauthorized()
     except jwt.PyJWKClientError:
         logger.warning("JWT verification failed: could not resolve signing key")
         raise _unauthorized()
-    except jwt.InvalidTokenError:
-        logger.warning("JWT verification failed: malformed or invalid token")
+    except jwt.InvalidTokenError as exc:
+        logger.warning("JWT verification failed: %s", type(exc).__name__)
         raise _unauthorized()
 
 
