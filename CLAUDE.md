@@ -1,4 +1,5 @@
 
+
 <!-- AGENT-FRAMEWORK:START (do not edit between these markers; managed by scripts/deploy.sh) -->
 # Agent Framework
 
@@ -94,6 +95,7 @@ features.
 | Command | Phase | Purpose |
 |---|---|---|
 | `/strategize` | strategy | Standalone, used on a new project and ongoing. Conversation with the `strategist` agent on business/UX/technical direction, recorded to `knowledge/strategy.md` |
+| `/product-manager next-task` | strategy | Standalone, sits between `/strategize` and `/design`. Spawns the `product-manager` agent to recommend the next feature to design, based on `knowledge/strategy.md` and what's already designed/implemented. Advisory only — writes nothing |
 | `/design` | design | Orchestrates `gather` → `analyze` → `draft` → `review` to produce a finalized-when-you-stop set of docs for one feature |
 | `/implement` | implement | Implements a single story: `plan` → `execute` → `test` → `commit` |
 | `/implement-batch` | implement | Runs `/implement` for every story in a feature folder, sequentially, stopping at the first failure |
@@ -108,6 +110,7 @@ stop talking during `/design` is what `/implement` will read.
 | Agent | Role |
 |---|---|
 | `strategist` | Helps decide/revise project-wide business, UX, and technical direction. Operates above the per-feature `/design` workflow |
+| `product-manager` | Recommends the single next feature to design, based on `strategy.md` and what's already designed/implemented. Advisory only — does not write requirements or code |
 | `orchestrator` | Breaks a story into the agent contributions it needs and sequences them; coordinates plan/execute/test/commit |
 | `frontend` | Implements UI/client-side code |
 | `backend` | Implements API/server/database code |
