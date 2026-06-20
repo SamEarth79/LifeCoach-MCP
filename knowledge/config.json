@@ -1,0 +1,7 @@
+{
+  "prefix": "LFC",
+  "nextFeatureNumber": 2,
+  "nextStoryNumber": {
+    "LFC-001-auth-infra-baseline": 5
+  }
+}
