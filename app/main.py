@@ -6,6 +6,7 @@ from slowapi.util import get_remote_address
 from app.auth import CurrentUser, get_current_user
 from app.config import get_settings
 from app.db import check_connectivity, get_rls_connection
+from app.schemas import GoalCreate, GoalResponse
 
 settings = get_settings()
 per_ip_rate_limit = f"{settings.rate_limit_requests}/{settings.rate_limit_window_seconds}second"
@@ -95,3 +96,32 @@ async def get_my_profile(
         "created_at": created_at.isoformat(),
         "updated_at": updated_at.isoformat(),
     }
+
+
+@app.post("/goals", status_code=status.HTTP_201_CREATED, response_model=GoalResponse)
+async def create_goal(
+    goal: GoalCreate,
+    _rate_limit: None = Depends(enforce_rate_limit),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> GoalResponse:
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO goals (user_id, title, description)
+                VALUES (%s, %s, %s)
+                RETURNING id, title, description, created_at, updated_at
+                """,
+                (current_user.id, goal.title, goal.description),
+            )
+            row = await cursor.fetchone()
+        await conn.commit()
+
+    goal_id, title, description, created_at, updated_at = row
+    return GoalResponse(
+        id=str(goal_id),
+        title=title,
+        description=description,
+        created_at=created_at.isoformat(),
+        updated_at=updated_at.isoformat(),
+    )

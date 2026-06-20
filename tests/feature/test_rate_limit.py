@@ -39,6 +39,9 @@ class _FakeConnection:
     def cursor(self):
         return _FakeCursor(self._row)
 
+    async def commit(self):
+        return None
+
 
 def _override_current_user():
     async def _fake_dependency():
@@ -160,6 +163,56 @@ def test_users_me_rate_limit_threshold_is_driven_by_settings_not_hardcoded(monke
         reloaded_main.limiter.reset()
         monkeypatch.undo()
         _reload_main_with_real_settings()
+
+
+def test_create_goal_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    body = {"title": "Run a marathon"}
+
+    first = client.post("/goals", json=body, headers=headers)
+    second = client.post("/goals", json=body, headers=headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+
+def test_create_goal_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    body = {"title": "Run a marathon"}
+
+    client.post("/goals", json=body, headers=headers)
+    client.post("/goals", json=body, headers=headers)
+    third = client.post("/goals", json=body, headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_create_goal_and_users_me_enforce_the_same_configured_threshold(low_limit_app):
+    """
+    AC5: POST /goals is subject to the existing rate limiter, the same as
+    /users/me — both routes use the shared `enforce_rate_limit` dependency
+    and the same `per_ip_rate_limit` string derived from Settings, so both
+    independently reject a client's 3rd request under the same RATE_LIMIT_*
+    configuration (slowapi tracks each decorated route as its own bucket,
+    so this asserts equivalent enforcement per route rather than a single
+    shared counter across routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    body = {"title": "Run a marathon"}
+    client.post("/goals", json=body, headers=headers)
+    client.post("/goals", json=body, headers=headers)
+    goals_third = client.post("/goals", json=body, headers=headers)
+
+    assert users_me_third.status_code == 429
+    assert goals_third.status_code == 429
 
 
 def test_health_endpoint_is_never_rate_limited(low_limit_app):

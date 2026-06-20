@@ -102,3 +102,103 @@ regressions introduced by adding this migration file.
 ### Totals: 0 new automated tests (none applicable beyond what already
 exists), 37/37 full suite passing, 0 failed. AC1–AC4 verified via dry-run
 SQL generation, not live execution — see environment limitation above.
+
+## LFC-STORY-002
+
+**Verdict: PASS**
+
+### Layers required
+
+- Unit: not separately required beyond what the feature tests already
+  exercise. `GoalCreate`'s whitespace-stripping/blank-rejection validator
+  is simple Pydantic field-validator logic, fully exercised end-to-end
+  through the feature tests below (a unit test in isolation would just
+  duplicate the same assertions without mocking anything new).
+- Feature: required and written — `POST /goals` is a new HTTP endpoint, and
+  every acceptance criterion maps to at least one assertion (see below).
+- E2E (Playwright): **not required**. This is a backend-only story (no new
+  UI, no page, no frontend consuming this endpoint yet) — same carve-out as
+  LFC-STORY-001 and every other backend-only story so far in this repo.
+
+### Feature tests — `tests/feature/test_create_goal.py` (7 new)
+
+Followed the conventions of `tests/feature/test_users_me.py`: `TestClient`
+with `dependency_overrides[get_current_user]` to inject a fake verified
+identity, and `monkeypatch.setattr(main, "get_rls_connection", ...)` with a
+fake async-context-manager connection/cursor to avoid touching a real
+database.
+
+- `test_create_goal_returns_201_with_full_shape` — AC1: valid JWT + full
+  body (title + description) returns `201` with the exact `GoalResponse`
+  shape (`id`, `title`, `description`, `created_at`, `updated_at`).
+- `test_create_goal_allows_omitted_description` — AC1: description is
+  genuinely optional; omitting it still returns `201` with `description:
+  null`.
+- `test_create_goal_rejects_missing_title_with_422_and_no_db_write` — AC2:
+  omitting `title` entirely returns `422`, and the fake cursor's
+  `execute` was never called — proving Pydantic validation rejects the
+  request before the handler body (and therefore the DB) is ever reached.
+- `test_create_goal_rejects_empty_title_with_422_and_no_db_write` — AC2:
+  a whitespace-only title (`"   "`) is rejected by `GoalCreate`'s
+  `reject_blank_title` validator with `422`, again with zero DB writes —
+  confirms the validator catches the "looks non-empty but isn't" case, not
+  just a literal empty string.
+- `test_create_goal_uses_verified_jwt_subject_as_user_id_for_insert` — AC3:
+  captures the `user_id` argument passed into `get_rls_connection` and the
+  first bound parameter of the `INSERT INTO goals` statement, and asserts
+  both equal `current_user.id` (the verified JWT subject), not anything
+  else.
+- `test_create_goal_ignores_client_supplied_user_id_in_request_body` — AC3:
+  sends a request body containing `"user_id": <a different UUID>` alongside
+  a valid title. Confirms the response is still `201` and the actual
+  `INSERT` parameter is the verified JWT subject's id — the
+  client-supplied `user_id` value never appears anywhere in the executed
+  query parameters. This also confirms the behavior the story requires:
+  `GoalCreate` has no `user_id` field, and Pydantic v2's default
+  `model_config` (no `extra="allow"` set) silently ignores unknown input
+  fields rather than erroring or passing them through — verified directly
+  against the installed `pydantic==2.13.4`, not assumed.
+- `test_create_goal_requires_authentication` — AC4: no `Authorization`
+  header → `401`, with no `dependency_overrides` for `get_current_user`,
+  proving `get_current_user` is actually wired into this specific route
+  (not just present elsewhere in the app) — mirrors
+  `test_get_users_me_requires_authentication` in
+  `tests/feature/test_users_me.py`.
+
+### Feature tests — `tests/feature/test_rate_limit.py` (3 new, extending the existing file)
+
+Followed the existing `low_limit_app` fixture pattern (env-var-driven low
+limit + `importlib.reload` of `app.main`), extended the fixture's
+`_FakeConnection` with an async `commit()` no-op since `POST /goals` commits
+after insert and the existing fixture's fake connection didn't previously
+need one (`GET /users/me` is read-only).
+
+- `test_create_goal_allows_requests_within_the_configured_limit` — AC5:
+  two requests under a configured limit of 2/60s both return `201`.
+- `test_create_goal_rejects_request_exceeding_the_configured_limit` — AC5:
+  a third request in the same window returns `429`.
+- `test_create_goal_and_users_me_enforce_the_same_configured_threshold` —
+  AC5: drives both `/users/me` and `/goals` to their 3rd request under the
+  same `RATE_LIMIT_REQUESTS=2` config and confirms both independently
+  return `429`. Note: slowapi tracks each `@limiter.limit`-style bucket per
+  decorated callable (here, the shared `enforce_rate_limit` dependency
+  function, but invoked once per route), so `/users/me` and `/goals` do
+  *not* share a single global counter — a request to one does not consume
+  the other's quota. The test was written to first assert exactly that (an
+  earlier draft assumed a shared bucket and failed, which is how this was
+  caught), then corrected to assert what AC5 actually requires: both
+  routes enforce the *same configured threshold* via the *same
+  `enforce_rate_limit` dependency and `per_ip_rate_limit` string*, not a
+  literal shared counter.
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root: **47 passed, 0
+failed** (37 pre-existing + 10 new). No regressions.
+
+### Totals: 10 new automated tests (7 feature in `test_create_goal.py` + 3
+feature in `test_rate_limit.py`), 47/47 full suite passing, 0 failed. All 5
+acceptance criteria verified directly against the real implementation
+(`app/main.py`, `app/schemas.py`), no unverified external-contract
+assumptions in this story (no third-party wire format involved — JWT
+verification itself was already covered and verified in LFC-001).
