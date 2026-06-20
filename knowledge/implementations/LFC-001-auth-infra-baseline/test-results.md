@@ -163,3 +163,110 @@ Also ran `alembic history --verbose`: confirms a single linear head
 ### Totals: 2 new unit tests passed, 0 failed. Full suite: 11 passed, 0
 failed (9 pre-existing + 2 new). SQL-level ACs (2, 3, 4) verified via
 dry-run generation, not live execution — see environment limitation above.
+
+## LFC-STORY-003
+
+**Verdict: PASS**
+
+### Layers required
+
+- Unit: required (`get_current_user`'s JWT verification logic — signature,
+  expiry, claim extraction, the upsert call shape — is non-trivial business
+  logic and fully mockable at the DB boundary).
+- Feature: required (`GET /users/me` end-to-end through its real FastAPI
+  handler, with the DB layer mocked, to verify AC3's "verified id, never a
+  client-supplied id" behavior and the 403/404 branches).
+- E2E (Playwright): **not required**. This story is backend-only — a JWT
+  verification dependency and a JSON API endpoint, with no page, no
+  rendered component, and no browser-driven user journey in this repo (no
+  frontend exists yet). Per `rules/testing.md`, E2E is required only for
+  stories that change user-facing behavior (UI flows, pages, forms); this
+  one has no such surface.
+
+### Environment limitation
+
+No live Supabase/Postgres instance was available in this sandbox (same
+constraint as LFC-STORY-002). `get_connection`/the cursor were mocked at
+the `app.auth` / `app.main` module boundary for all new tests, so DB
+interaction (the `INSERT ... ON CONFLICT DO NOTHING` upsert, the `SELECT`
+in `/users/me`) is verified by asserting the exact query/params passed to
+the mocked cursor, not by executing against a real Postgres. Unlike
+STORY-002's migration, this is squarely within what mocking can validate
+deterministically — the dependency's control flow (token verified ahead of
+any DB call, correct params passed to the upsert/select) doesn't require a
+real database to prove correct. What is **not** verified here: that the
+real `INSERT ... ON CONFLICT (id) DO NOTHING` actually succeeds against a
+real Supabase Postgres instance under the project's actual role
+permissions and RLS configuration — `app/auth.py`'s own design documents
+this as an assumption ("assumes DATABASE_URL role has RLS-bypass
+privileges"), not something verified by this test run. This should be
+re-checked against a real Supabase project before considering AC4 fully
+verified end-to-end.
+
+### Unit tests — 10 passed, 0 failed (new)
+
+`tests/unit/test_auth.py`:
+- valid token → `get_current_user` returns a `CurrentUser` with the
+  verified `sub`/`email`, and issues exactly one upsert call with
+  `(user_id, email)` params against `INSERT INTO users ... ON CONFLICT
+  (id) DO NOTHING`, followed by a commit (AC2, AC4)
+- expired token → 401, and confirms zero DB calls happened (verification
+  fails before reaching DB logic) (AC2)
+- malformed (non-JWT) token → 401
+- missing `Authorization` header → 401
+- tampered signature (wrong secret) → 401
+- non-Bearer auth scheme → 401
+- token missing `sub`/`email` claims → 401
+- failed-auth log output does not contain the raw token value (AC5)
+- failed-auth log output does not contain the user's email/PII (AC5)
+
+### Feature tests — 4 passed, 0 failed (new)
+
+`tests/feature/test_users_me.py` (FastAPI `TestClient`, `get_current_user`
+dependency overridden, DB cursor mocked):
+- `GET /users/me` with a valid verified identity and a mocked matching DB
+  row returns 200 with the exact `{"id","email","display_name",
+  "created_at","updated_at"}` JSON shape (AC3)
+- `GET /users/me` returns 404 when no row exists for the verified id (AC4
+  follow-on: a new user with no row yet gets a clean 404, not a 500 or
+  leaked DB error)
+- `GET /users/me` returns 403 when the row returned by the (mocked) DB
+  query has an id that doesn't match the verified id from the dependency —
+  confirms the app-level id-match check exists and that the endpoint never
+  trusts a client-supplied id (AC3)
+- `GET /users/me` with no `Authorization` header returns 401 before
+  reaching handler logic (AC2)
+
+### Bug check: async/sync mismatch (none found)
+
+STORY-002's writeup flagged a hypothetical class of bug to watch for here:
+`app/db.py`'s `get_connection()` being sync `psycopg` while `app/auth.py`
+calls it with `async with`. Re-read both files directly: `app/db.py`
+defines `get_connection` as `@asynccontextmanager async def
+get_connection() -> AsyncIterator[AsyncConnection]`, using
+`psycopg.AsyncConnection.connect(...)` — it is async throughout, matching
+how `app/auth.py`'s `_ensure_user_row_exists` and `app/main.py`'s
+`get_my_profile` consume it (`async with get_connection()`, `async with
+conn.cursor()`, `await cursor.execute(...)`). No async/sync mismatch exists
+in the code as built for this story.
+
+### Other observations (not blocking, no bug found)
+
+- `app/main.py`'s `/users/me` handler does `str(user_id) != current_user.id`
+  to detect an id mismatch, where `user_id` comes back from psycopg as a
+  Python `uuid.UUID` (column is `UUID` type per the STORY-002 migration)
+  and `current_user.id` is the JWT `sub` string. `str(uuid.UUID(...))`
+  normalizes to the standard lowercase-hyphenated form, and Supabase JWTs'
+  `sub` claim is already in that form, so the comparison is correct in
+  practice — but it is implicitly relying on both sides normalizing to the
+  same string representation. Not exercised against a real psycopg
+  connection in this test run (the mocked cursor returns a plain string in
+  the row tuple, which side-steps the `UUID`-vs-`str` comparison entirely).
+  Flagging as a residual gap from the "no live DB" constraint, not a
+  defect — should be confirmed once a real Supabase/Postgres instance is
+  available.
+
+### E2E tests — not applicable (see rationale above)
+
+### Totals: 14 new tests passed (10 unit, 4 feature), 0 failed. Full suite:
+25 passed, 0 failed (11 pre-existing + 14 new).

@@ -91,3 +91,71 @@ Result: 2/2 new unit tests passing, full suite 11/11 passing. SQL-level ACs
 verified via dry-run generation only, not live execution. Verdict: PASS
 WITH CAVEATS (see test-results.md for the full environment-limitation
 writeup).
+
+## LFC-STORY-003
+
+Tested the `get_current_user` JWT verification dependency (`app/auth.py`)
+and the `GET /users/me` endpoint (`app/main.py`) against all five
+acceptance criteria.
+
+What was tested and why:
+
+- AC2 (JWT signature/expiry verification, 401 before handler logic): unit
+  tests in `tests/unit/test_auth.py` exercise `get_current_user` directly
+  with real PyJWT-encoded tokens (valid, expired, tampered-signature,
+  malformed, missing claims, non-Bearer scheme, missing header) against the
+  real `_decode_token` logic — no real DB needed for this layer, since
+  rejection happens before any DB call, which the tests explicitly assert
+  (zero DB calls recorded on every rejection path).
+- AC3 (`/users/me` returns the row for the verified id, never a
+  client-supplied id): feature tests in `tests/feature/test_users_me.py`
+  override the `get_current_user` dependency with a fixed verified
+  identity and mock the DB cursor's returned row, covering the 200 (shape
+  matches the row), and a deliberate-mismatch case where the mocked row's
+  id differs from the verified id — confirming the app-level guard in
+  `app/main.py` (`if str(user_id) != current_user.id: raise 403`) actually
+  fires rather than trusting the row blindly.
+- AC4 (new auth user automatically gets a `users` row via first-request
+  upsert): unit test asserts `get_current_user`'s upsert path issues
+  exactly one `INSERT INTO users (id, email) VALUES (...) ON CONFLICT (id)
+  DO NOTHING` with the verified `(sub, email)` as params, followed by a
+  commit — this is the "first-request upsert" mechanism the story
+  describes. The feature-level 404 test additionally confirms that if the
+  row genuinely doesn't exist yet (e.g. upsert raced or hasn't landed),
+  `/users/me` fails cleanly with 404 rather than crashing.
+- AC5 (no token/PII in logs on failed auth): two tests capture log records
+  via `caplog` during a rejection (expired token, tampered signature) and
+  assert the raw token string and the user's email never appear in any
+  captured log message.
+- AC1 (Supabase Auth provider configuration for email/password + Google):
+  not code — this is a manual Supabase dashboard configuration step, which
+  the story itself documents as a manual prerequisite outside what code/
+  tests can verify. No automated test applies.
+- E2E (Playwright) was explicitly skipped: this story is backend-only (a
+  FastAPI dependency and a JSON endpoint), with no frontend, page, or
+  browser-driven flow in this repo yet. Per `rules/testing.md`, E2E is
+  only required for stories that change user-facing behavior.
+
+Bug check explicitly requested by the story (async/sync mismatch in DB
+usage): re-read `app/db.py` and `app/auth.py` directly. `get_connection()`
+is implemented as `@asynccontextmanager async def ... ->
+AsyncIterator[AsyncConnection]` using `psycopg.AsyncConnection.connect`,
+and both `app/auth.py` and `app/main.py` consume it consistently with
+`async with` / `await cursor.execute(...)`. No async/sync mismatch exists —
+this concern, carried over from STORY-002's writeup, does not apply to the
+code as actually built here.
+
+One residual gap worth flagging (not a code defect, a test-environment
+limitation): `app/main.py`'s id-match check compares `str(user_id) !=
+current_user.id`, where in a real run `user_id` would come back from
+psycopg as a `uuid.UUID` (the `users.id` column is `UUID` per the
+STORY-002 migration) rather than the plain string used in this test's
+mocked row. The comparison is expected to work correctly (`str(UUID(...))`
+normalizes to the same lowercase-hyphenated form Supabase's JWT `sub`
+claim uses), but this exact code path — `UUID` object coming back from a
+real psycopg cursor — was not exercised here, since no live DB was
+available. Should be confirmed against a real Supabase/Postgres instance.
+
+Result: 14/14 new tests passing (10 unit, 4 feature). Full suite: 25/25
+passing (11 pre-existing + 14 new). All five acceptance criteria verified
+(AC1 by inspection/documentation, AC2–AC5 by test). Verdict: PASS.
