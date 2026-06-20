@@ -27,6 +27,16 @@ full picture of a story's execution.
      frontend when frontend consumes a new/changed API; infrastructure
      before either if new infra (e.g. a new service, a new env var, a new
      queue) is a prerequisite.
+   - If the story integrates with a third-party identity/auth provider or
+     any external system whose exact protocol details (signing algorithm,
+     webhook signature scheme, response shape) are not already confirmed
+     in `architecture.md` against real documentation or a live instance,
+     call this out explicitly in the plan as an open risk before execution
+     starts — don't let an unverified assumption travel silently from
+     `architecture.md` into implementation. Note in the plan whether a
+     live/sandbox instance of that system is available to verify against
+     during `test.md`, or whether the story should be flagged
+     `PASS WITH CAVEATS` per `rules/testing.md` if not.
    - Present the plan (agents + order) to the user before execution begins.
 
 2. **Execute** (used by `commands/execute.md`)

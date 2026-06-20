@@ -30,6 +30,15 @@ the existing setup.
    - Don't expose a port or database publicly unless the story explicitly
      requires it.
 
+## External integrations
+
+- When provisioning config for a third-party service whose exact
+  protocol/behavior you don't have 100% confirmed (e.g. an identity
+  provider's signing scheme, a managed database's default role
+  privileges), do not assume the "more standard-sounding" default. Confirm
+  it against current documentation, or surface the uncertainty explicitly
+  as an open risk in your report rather than resolving it silently.
+
 ## Implementation
 
 - Match existing infra conventions exactly (compose file structure, CI
@@ -50,4 +59,7 @@ Report back to the orchestrator:
 - Any new service, env var, or infra dependency introduced, and what
   downstream agents need to know to use it.
 - Any deviation from the architecture doc and why.
+- Any unconfirmed assumption about a third-party system's protocol/wire
+  format that you were unable to verify against real documentation or a
+  live instance, named explicitly.
 - Anything you could not complete and why.

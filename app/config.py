@@ -8,7 +8,6 @@ class Settings(BaseSettings):
 
     supabase_url: str
     supabase_anon_key: str
-    supabase_jwt_secret: str
     database_url: str
     rate_limit_requests: int = 30
     rate_limit_window_seconds: int = 60

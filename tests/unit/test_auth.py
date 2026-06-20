@@ -3,25 +3,42 @@ from contextlib import asynccontextmanager
 
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
 from app import auth
 from app.config import get_settings
 
-JWT_SECRET = "jwt-secret"
 USER_ID = "11111111-1111-1111-1111-111111111111"
 EMAIL = "user@example.com"
 
+_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
+_PUBLIC_KEY = _PRIVATE_KEY.public_key()
+_OTHER_PRIVATE_KEY = ec.generate_private_key(ec.SECP256R1())
 
-def _make_token(secret=JWT_SECRET, **overrides):
+
+def _make_token(private_key=_PRIVATE_KEY, **overrides):
     payload = {"sub": USER_ID, "email": EMAIL, "aud": "authenticated"}
     payload.update(overrides)
-    return jwt.encode(payload, secret, algorithm="HS256")
+    return jwt.encode(payload, private_key, algorithm="ES256")
 
 
 def _credentials(token, scheme="Bearer"):
     return HTTPAuthorizationCredentials(scheme=scheme, credentials=token)
+
+
+class _FakeSigningKey:
+    def __init__(self, key):
+        self.key = key
+
+
+class _FakeJWKSClient:
+    def __init__(self, key=_PUBLIC_KEY):
+        self._key = key
+
+    def get_signing_key_from_jwt(self, _token):
+        return _FakeSigningKey(self._key)
 
 
 class _FakeCursor:
@@ -54,11 +71,15 @@ class _FakeConnection:
 def _env_settings(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
-    monkeypatch.setenv("SUPABASE_JWT_SECRET", JWT_SECRET)
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/db")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _patch_jwks(monkeypatch):
+    monkeypatch.setattr(auth, "_get_jwks_client", lambda jwks_url: _FakeJWKSClient())
 
 
 def _patch_db(monkeypatch):
@@ -129,7 +150,7 @@ async def test_missing_authorization_header_raises_401(monkeypatch):
 @pytest.mark.asyncio
 async def test_tampered_signature_raises_401(monkeypatch):
     executed_queries, _ = _patch_db(monkeypatch)
-    token = _make_token(secret="wrong-secret")
+    token = _make_token(private_key=_OTHER_PRIVATE_KEY)
 
     with pytest.raises(HTTPException) as exc_info:
         await auth.get_current_user(_credentials(token))
@@ -154,7 +175,28 @@ async def test_non_bearer_scheme_raises_401(monkeypatch):
 async def test_token_missing_sub_or_email_raises_401(monkeypatch):
     executed_queries, _ = _patch_db(monkeypatch)
     payload = {"aud": "authenticated"}
-    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+    token = jwt.encode(payload, _PRIVATE_KEY, algorithm="ES256")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.get_current_user(_credentials(token))
+
+    assert exc_info.value.status_code == 401
+    assert executed_queries == []
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_signing_key_raises_401(monkeypatch):
+    executed_queries, _ = _patch_db(monkeypatch)
+
+    def _raise_jwks_error(_jwks_url):
+        class _BrokenJWKSClient:
+            def get_signing_key_from_jwt(self, _token):
+                raise jwt.PyJWKClientError("no matching key")
+
+        return _BrokenJWKSClient()
+
+    monkeypatch.setattr(auth, "_get_jwks_client", _raise_jwks_error)
+    token = _make_token()
 
     with pytest.raises(HTTPException) as exc_info:
         await auth.get_current_user(_credentials(token))
@@ -179,7 +221,7 @@ async def test_failed_auth_does_not_log_token_value(monkeypatch, caplog):
 @pytest.mark.asyncio
 async def test_failed_auth_does_not_log_email_or_pii(monkeypatch, caplog):
     _patch_db(monkeypatch)
-    token = _make_token(secret="wrong-secret")
+    token = _make_token(private_key=_OTHER_PRIVATE_KEY)
 
     with caplog.at_level(logging.WARNING):
         with pytest.raises(HTTPException):

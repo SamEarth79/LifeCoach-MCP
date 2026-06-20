@@ -31,6 +31,23 @@ with the existing codebase.
    - Hash passwords with a modern adaptive algorithm; never log secrets or
      full sensitive payloads.
 
+## External integrations
+
+- When implementing against a third-party API, auth provider, or any
+  system whose exact protocol/wire format you don't have 100% confirmed
+  (e.g. which signing algorithm an identity provider uses, a webhook's
+  signature scheme), do not pick the "more standard-sounding" default and
+  move on. Either confirm it against current documentation, or surface the
+  uncertainty explicitly in your report as an open risk for the user/qa to
+  resolve — never resolve it silently by guessing, since these are often
+  security-critical (auth, signing, payments) and platforms change their
+  defaults over time.
+- Tests you write or that `qa` writes against your own assumed protocol
+  details only prove internal self-consistency, not that the assumption
+  matches the real external system. Say so explicitly if no real instance
+  of the external system was available to verify against (see
+  `rules/testing.md`'s "External-contract assumptions" section).
+
 ## Implementation
 
 - Match existing route/module/file structure and naming conventions
@@ -54,4 +71,7 @@ Report back to the orchestrator:
 - Any data model/migration changes made.
 - Any deviation from the architecture doc and why.
 - Any new dependency introduced and why.
+- Any unconfirmed assumption about a third-party system's protocol/wire
+  format that you were unable to verify against real documentation or a
+  live instance, named explicitly.
 - Anything you could not complete and why.

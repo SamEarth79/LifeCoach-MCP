@@ -48,6 +48,32 @@ test layers used throughout this framework and what "passing" means before
   Playwright's built-in waiting/assertions (`expect(...).toBeVisible()`,
   `waitForResponse`, etc.).
 
+## External-contract assumptions
+
+Some stories depend on a third-party system's actual wire format or
+protocol details — e.g. how an identity provider signs tokens, a webhook's
+signature scheme, a payment provider's response shape. A test that signs
+with assumption X and verifies with the same assumption X only proves
+internal self-consistency; it proves nothing about whether assumption X
+matches the real external system, and can pass 100% of the time while
+failing 100% of real traffic.
+
+- If a story's correctness depends on an external system's actual
+  behavior, and that behavior was not confirmed against current
+  documentation or a live instance of the system, treat the assumption as
+  an unverified risk — not a settled fact baked into the implementation.
+- Self-consistency tests (mocked tokens/payloads built from the same
+  assumption the code under test relies on) do not satisfy the "passing"
+  bar for that assumption on their own. Either verify against a real
+  instance of the external system, or mark the story `PASS WITH CAVEATS`
+  in `test-results.md` with the specific unverified assumption named
+  explicitly — the same way a migration that only ran in dry-run mode
+  against no real database must be flagged, not silently reported as a
+  clean pass.
+- When in doubt about which external behavior is current "default" (e.g. a
+  platform offering both a legacy and a current scheme), do not guess.
+  Look it up, or flag it to the user as an open question.
+
 ## General testing principles
 
 - Tests assert behavior, not implementation detail. Don't assert on internal

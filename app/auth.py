@@ -1,8 +1,10 @@
 import logging
+from functools import lru_cache
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt import PyJWKClient
 
 from app.config import get_settings
 from app.db import get_rls_connection
@@ -26,13 +28,20 @@ def _unauthorized() -> HTTPException:
     )
 
 
+@lru_cache
+def _get_jwks_client(jwks_url: str) -> PyJWKClient:
+    return PyJWKClient(jwks_url)
+
+
 def _decode_token(token: str) -> dict:
     settings = get_settings()
+    jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
     try:
+        signing_key = _get_jwks_client(jwks_url).get_signing_key_from_jwt(token)
         return jwt.decode(
             token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
+            signing_key.key,
+            algorithms=["ES256"],
             audience="authenticated",
         )
     except jwt.ExpiredSignatureError:
@@ -40,6 +49,9 @@ def _decode_token(token: str) -> dict:
         raise _unauthorized()
     except jwt.InvalidSignatureError:
         logger.warning("JWT verification failed: invalid signature")
+        raise _unauthorized()
+    except jwt.PyJWKClientError:
+        logger.warning("JWT verification failed: could not resolve signing key")
         raise _unauthorized()
     except jwt.InvalidTokenError:
         logger.warning("JWT verification failed: malformed or invalid token")

@@ -10,7 +10,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "alembic>=1.13",
     "sqlalchemy>=2.0",
-    "pyjwt>=2.9",
+    "pyjwt[crypto]>=2.9",
     "slowapi>=0.1.9",
 ]
 

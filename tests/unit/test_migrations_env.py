@@ -11,7 +11,6 @@ from app.config import get_settings
 ENV_VARS = {
     "SUPABASE_URL": "https://example.supabase.co",
     "SUPABASE_ANON_KEY": "anon-key",
-    "SUPABASE_JWT_SECRET": "jwt-secret",
     "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
 }
 
