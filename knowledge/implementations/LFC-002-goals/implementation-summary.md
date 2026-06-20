@@ -122,3 +122,62 @@ verified directly against the real implementation. No unverified
 external-contract assumptions baked into this story — JWT verification's
 external contract (Supabase's actual signing scheme) was already verified
 in LFC-001-auth-infra-baseline and isn't re-litigated here. Verdict: PASS.
+
+## LFC-STORY-003
+
+Tested the `GET /goals` endpoint (`app/main.py`), which lists the
+requester's goals via a plain, unfiltered `SELECT ... ORDER BY created_at
+DESC` that relies entirely on the `goals_select_own` RLS policy (`auth.uid()
+= user_id AND deleted_at IS NULL`, created in LFC-STORY-001's migration) for
+per-user scoping and soft-delete exclusion — no app-level `WHERE` clause.
+
+What was tested and why:
+
+- AC1 (200 with full shape) and AC2 (200 with empty array when no goals):
+  two tests in the new `tests/feature/test_list_goals.py` confirm the exact
+  `GoalResponse` array shape for one row, and an empty array when the
+  (mocked) cursor's `fetchall()` returns nothing.
+- AC3 (soft-deleted goals excluded) and AC4 (other users' goals excluded):
+  these are enforced entirely by the `goals_select_own` RLS policy at the
+  Postgres layer, not by application code, and this environment has no
+  live Postgres/Supabase instance (same constraint as LFC-STORY-001's
+  migration testing). A feature test with a mocked cursor cannot exercise
+  real RLS evaluation — the mock returns whatever rows the test hands it
+  regardless of `auth.uid()` or `deleted_at`. Writing a test that fed the
+  mock a "deleted" or "other user's" row and asserted it didn't appear
+  would only prove the test's own setup is self-consistent, not that RLS
+  actually filters anything — exactly the kind of misleading test
+  `rules/testing.md`'s "External-contract assumptions" section warns
+  against, applied here to an internal trust boundary (RLS) rather than an
+  external one. Instead, what's verifiable and was tested: that the
+  endpoint issues no client-side filter that could mask or conflict with
+  RLS, and correctly passes the verified user id into the RLS-scoped
+  connection (`test_list_goals_issues_no_client_side_filter_that_would_conflict_with_rls`).
+  AC3 and AC4 are therefore unverified against a live database — flagged
+  explicitly in test-results.md, not silently assumed to pass.
+- AC5 (missing/malformed/expired JWT -> 401): one test sends a request
+  with no `Authorization` header and no `dependency_overrides` for
+  `get_current_user`, confirming `401` and that `get_current_user` is
+  wired into this specific route.
+- AC6 (rate-limited like other endpoints, and stable `ORDER BY
+  created_at DESC` ordering): split into two parts. The application-side
+  ordering contract was tested directly — the endpoint passes through
+  whatever order the (mocked) cursor's `fetchall()` returns without
+  re-sorting, and the literal SQL string contains `ORDER BY created_at
+  DESC` — but whether Postgres actually executes that ordering correctly
+  against live data is, like AC3/AC4, unverified here. The rate-limiting
+  half was tested by extending `tests/feature/test_rate_limit.py` with
+  three tests following the existing `low_limit_app` fixture pattern; the
+  fixture's shared `_FakeCursor`/`_FakeConnection` needed a new `fetchall()`
+  method added since it previously only supported `fetchone()` (both prior
+  routes using the fixture, `/users/me` and `POST /goals`, are single-row).
+
+Result: 8 new automated tests (5 in `tests/feature/test_list_goals.py`, 3
+added to `tests/feature/test_rate_limit.py`). Full suite: 55/55 passing (47
+pre-existing + 8 new), 0 regressions. AC1, AC2, AC5, and the application-side
+half of AC6 verified directly against the real implementation. AC3, AC4,
+and the live-execution half of AC6 (the `ORDER BY` actually sorting
+correctly in Postgres) are unverified against a real database in this
+environment — explicit caveat in test-results.md, consistent with the
+precedent set by LFC-STORY-001's migration testing. No code defects found.
+Verdict: PASS WITH CAVEATS.

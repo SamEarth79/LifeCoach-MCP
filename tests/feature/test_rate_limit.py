@@ -25,6 +25,9 @@ class _FakeCursor:
     async def fetchone(self):
         return self._row
 
+    async def fetchall(self):
+        return [self._row] if self._row is not None else []
+
     async def __aenter__(self):
         return self
 
@@ -210,6 +213,54 @@ def test_create_goal_and_users_me_enforce_the_same_configured_threshold(low_limi
     client.post("/goals", json=body, headers=headers)
     client.post("/goals", json=body, headers=headers)
     goals_third = client.post("/goals", json=body, headers=headers)
+
+    assert users_me_third.status_code == 429
+    assert goals_third.status_code == 429
+
+
+def test_list_goals_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    first = client.get("/goals", headers=headers)
+    second = client.get("/goals", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_list_goals_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    client.get("/goals", headers=headers)
+    client.get("/goals", headers=headers)
+    third = client.get("/goals", headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_list_goals_enforces_the_same_configured_threshold_as_other_routes(low_limit_app):
+    """
+    AC6 (LFC-STORY-003): GET /goals is subject to the existing rate limiter,
+    the same as /users/me and POST /goals — all three routes use the shared
+    `enforce_rate_limit` dependency and the same `per_ip_rate_limit` string
+    derived from Settings, so each independently rejects a client's 3rd
+    request under the same RATE_LIMIT_* configuration (slowapi tracks each
+    decorated route as its own bucket, so this asserts equivalent
+    enforcement per route rather than a single shared counter across
+    routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    client.get("/goals", headers=headers)
+    client.get("/goals", headers=headers)
+    goals_third = client.get("/goals", headers=headers)
 
     assert users_me_third.status_code == 429
     assert goals_third.status_code == 429

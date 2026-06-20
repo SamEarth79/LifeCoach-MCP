@@ -125,3 +125,31 @@ async def create_goal(
         created_at=created_at.isoformat(),
         updated_at=updated_at.isoformat(),
     )
+
+
+@app.get("/goals", response_model=list[GoalResponse])
+async def list_goals(
+    _rate_limit: None = Depends(enforce_rate_limit),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> list[GoalResponse]:
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT id, title, description, created_at, updated_at
+                FROM goals
+                ORDER BY created_at DESC
+                """
+            )
+            rows = await cursor.fetchall()
+
+    return [
+        GoalResponse(
+            id=str(goal_id),
+            title=title,
+            description=description,
+            created_at=created_at.isoformat(),
+            updated_at=updated_at.isoformat(),
+        )
+        for goal_id, title, description, created_at, updated_at in rows
+    ]
