@@ -159,3 +159,62 @@ available. Should be confirmed against a real Supabase/Postgres instance.
 Result: 14/14 new tests passing (10 unit, 4 feature). Full suite: 25/25
 passing (11 pre-existing + 14 new). All five acceptance criteria verified
 (AC1 by inspection/documentation, AC2–AC5 by test). Verdict: PASS.
+
+## LFC-STORY-004
+
+Tested rate limiting on `/users/me` (slowapi `Limiter`, per-IP via
+`get_remote_address`) against all three acceptance criteria, plus the
+architectural requirement that `/health` stays unauthenticated and
+unlimited.
+
+- AC1 (rate-limited per client): verified via `tests/feature/
+  test_rate_limit.py`, reloading `app.main` with a low test-only limit
+  (2 requests/60s) injected through `RATE_LIMIT_REQUESTS`/
+  `RATE_LIMIT_WINDOW_SECONDS` env vars, then issuing real requests through
+  a `TestClient` against the real `Limiter`/`FastAPI` app — no mocking of
+  slowapi itself. Requests within the limit return `200`; the request past
+  it is rejected.
+- AC2 (429, not 500/unhandled): asserted the rejected response's status
+  code is exactly `429` and explicitly not `500`, and that the body
+  contains an `error`/`detail` key rather than an empty or malformed
+  payload.
+- AC3 (config-driven, not hardcoded): two unit tests on
+  `app.config.Settings` confirm the rate limit fields default to 30/60 and
+  are overridable via env vars; one feature test sets
+  `RATE_LIMIT_REQUESTS=1` and confirms the *enforced* behavior changes
+  (second request now rejected instead of the third), proving the value
+  actually flows into the limiter, not just into an unused settings field.
+- `/health` unaffected: confirmed 10 rapid unauthenticated requests to
+  `/health` never return `429` even while `/users/me`'s limit is set to 2,
+  and that no `WWW-Authenticate` header appears — `/health` remains usable
+  by PaaS health checks regardless of `/users/me`'s limiter state.
+
+Approach for testability: `app/main.py` builds the `Limiter` and the
+`per_ip_rate_limit` string once at import time from `get_settings()`,
+with no per-request/per-test override seam. Tests achieve a deterministic
+low threshold by setting env vars via `monkeypatch` and
+`importlib.reload(app.main)` before constructing a fresh `TestClient`,
+avoiding the need to burn through 30 real requests against the production
+default.
+
+Bug found and fixed during test-writing (not in application code): the
+first draft of the test fixture left `app.main` permanently pointed at the
+test's low rate limit after the test finished, because `monkeypatch`'s env
+var teardown runs after the fixture's own teardown, and the fixture's
+final restorative `importlib.reload` was issued while the low-limit env
+vars were technically still set. This caused
+`tests/feature/test_users_me.py`'s 403 test to intermittently return `429`
+instead, but only when run after `test_rate_limit.py` — a real, order-
+dependent test pollution bug, exactly the kind `rules/testing.md` calls out
+("tests must be runnable independently and in any order"). Fixed by calling
+`monkeypatch.undo()` before the final reload. Re-verified the full 31-test
+suite passes in three different run orders (declared, reversed, and
+interleaved) with no leakage.
+
+Environment note: no `.env` file existed in this checkout (gitignored, not
+committed). Created a local-only `.env` with placeholder values mirroring
+`.env.example` so `Settings()` could load; not committed.
+
+Result: 7/7 new tests passing (2 unit, 5 feature). Full suite: 31/31
+passing (24 pre-existing + 7 new). All three acceptance criteria verified
+by test, plus the `/health` architectural requirement. Verdict: PASS.

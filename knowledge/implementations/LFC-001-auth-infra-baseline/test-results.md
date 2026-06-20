@@ -270,3 +270,82 @@ in the code as built for this story.
 
 ### Totals: 14 new tests passed (10 unit, 4 feature), 0 failed. Full suite:
 25 passed, 0 failed (11 pre-existing + 14 new).
+
+## LFC-STORY-004
+
+**Verdict: PASS**
+
+### Layers required
+
+- Unit: required (rate limit settings — default values and env var
+  overrides — new business logic in `app/config.py`).
+- Feature: required (`/users/me` rate limiting end-to-end through the real
+  FastAPI app + slowapi `Limiter`, and `/health` remaining unaffected).
+- E2E (Playwright): not required. Backend-only change with no new UI or
+  user-facing page; the existing user-facing surface is unchanged.
+
+### Unit tests — 2 new passed, 0 failed
+
+`tests/unit/test_config.py` (2 new tests, 5 total in file, all passing):
+- `rate_limit_requests`/`rate_limit_window_seconds` default to 30/60 when
+  not set in the environment (AC3)
+- both fields are overridable via `RATE_LIMIT_REQUESTS`/
+  `RATE_LIMIT_WINDOW_SECONDS` env vars (AC3)
+
+### Feature tests — 5 new passed, 0 failed
+
+`tests/feature/test_rate_limit.py` (new file):
+- `GET /users/me` allows requests within a configured limit (AC1)
+- the request exceeding the configured limit on `/users/me` is rejected
+  (AC1)
+- the rejection is exactly `429`, not `500` or an unhandled exception, and
+  the response body contains an `error`/`detail` key (AC2)
+- lowering `RATE_LIMIT_REQUESTS` to `1` via env var changes enforced
+  behavior (second request now rejected), proving the threshold flows from
+  `Settings` into the limiter rather than being a hardcoded magic number
+  (AC3)
+- `GET /health` stays unlimited (10 rapid requests, none `429`) and
+  unauthenticated even while `/users/me`'s limit is set very low (hard
+  architectural requirement, not itself an AC but explicitly called out as
+  must-hold)
+
+Approach: rather than burning through the real default of 30 requests/60s,
+these tests set `RATE_LIMIT_REQUESTS`/`RATE_LIMIT_WINDOW_SECONDS` env vars
+via `monkeypatch` to a low value (2/60s, or 1/60s for the AC3 test) and
+`importlib.reload(app.main)` before constructing a fresh `TestClient`. This
+is necessary because `app/main.py` builds the limiter and its
+`per_ip_rate_limit` string once at module import time from `get_settings()`
+— there's no per-request override hook, so the only way to exercise a
+different threshold is to reload the module with different settings
+already in the environment.
+
+State leakage caught and fixed during this run: slowapi's in-memory
+`Limiter` storage is local to each `Limiter` instance, but `app.main` is a
+process-wide singleton module. The first version of the `low_limit_app`
+fixture restored the module via `importlib.reload(main_module)` inside a
+`monkeypatch`-backed env var context whose teardown (un-setting
+`RATE_LIMIT_REQUESTS`/`RATE_LIMIT_WINDOW_SECONDS`) only runs *after*
+pytest's fixture teardown finishes — so the restorative reload at the end
+of the fixture was still reading the low-limit env vars, leaving
+`app.main` permanently pointed at a 2-requests/60s limiter for every test
+file that ran afterward in the same process. This surfaced as a real,
+order-dependent failure: `tests/feature/test_users_me.py::
+test_get_users_me_returns_403_when_row_id_does_not_match_verified_id`
+passed in isolation but failed (`429` instead of `403`) whenever it ran
+after `test_rate_limit.py`. Fixed by calling `monkeypatch.undo()` before
+the final restorative `importlib.reload`, so the module is rebuilt against
+the real `.env`-backed settings, not the test's overridden ones. Verified
+by running the full suite in three different orderings (declared order,
+reversed file order, and an interleaved order) plus running
+`test_rate_limit.py` twice followed by `test_users_me.py` in the same
+session — all 31 tests pass in every ordering with no leakage.
+
+Environment note: this checkout had no local `.env` file (it's
+gitignored, not committed, and apparently wasn't carried over from
+whichever environment ran STORY-001–003's tests). Created a local-only
+`.env` with placeholder Supabase/DB values — identical in shape to
+`.env.example` — so `Settings()` can load at all; this file is not
+committed (confirmed via `git status`, which shows no `.env` entry).
+
+### Totals: 7 new tests passed (2 unit, 5 feature), 0 failed. Full suite:
+31 passed, 0 failed (24 pre-existing + 7 new).

@@ -44,3 +44,27 @@ def test_get_settings_is_cached(monkeypatch):
 
     assert first is second
     get_settings.cache_clear()
+
+
+def test_rate_limit_settings_default_when_not_set_in_environment(monkeypatch):
+    for key, value in ENV_VARS.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("RATE_LIMIT_REQUESTS", raising=False)
+    monkeypatch.delenv("RATE_LIMIT_WINDOW_SECONDS", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.rate_limit_requests == 30
+    assert settings.rate_limit_window_seconds == 60
+
+
+def test_rate_limit_settings_are_overridable_via_environment_variables(monkeypatch):
+    for key, value in ENV_VARS.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("RATE_LIMIT_REQUESTS", "5")
+    monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "10")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.rate_limit_requests == 5
+    assert settings.rate_limit_window_seconds == 10

@@ -1,9 +1,20 @@
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.auth import CurrentUser, get_current_user
+from app.config import get_settings
 from app.db import check_connectivity, get_connection
 
+settings = get_settings()
+per_ip_rate_limit = f"{settings.rate_limit_requests}/{settings.rate_limit_window_seconds}second"
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[per_ip_rate_limit])
+
 app = FastAPI(title="LifeCoach API")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 @app.get("/health")
@@ -17,7 +28,10 @@ async def health(response: Response) -> dict:
 
 
 @app.get("/users/me")
-async def get_my_profile(current_user: CurrentUser = Depends(get_current_user)) -> dict:
+@limiter.limit(per_ip_rate_limit)
+async def get_my_profile(
+    request: Request, current_user: CurrentUser = Depends(get_current_user)
+) -> dict:
     async with get_connection() as conn:
         async with conn.cursor() as cursor:
             await cursor.execute(
