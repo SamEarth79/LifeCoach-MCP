@@ -16,13 +16,21 @@ def get_client_ip(request: Request) -> str:
 
     The app runs behind the PaaS host's reverse proxy, so the raw TCP peer
     (`request.client.host`) is the proxy, not the client — every request
-    would otherwise collapse into a single shared rate-limit bucket. The
-    proxy is trusted to set/overwrite `X-Forwarded-For` with the real
-    client IP as its leftmost entry.
+    would otherwise collapse into a single shared rate-limit bucket.
+
+    The leftmost `X-Forwarded-For` entry is client-supplied and can be
+    spoofed (a proxy that appends rather than overwrites would let a
+    client inject its own value ahead of the real chain). Only the
+    rightmost `trusted_proxy_hops` entries are appended by infrastructure
+    we trust; the client IP is the one just before those, which cannot be
+    forged because it's appended by our own trusted proxy, not the client.
     """
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+        hops = [hop.strip() for hop in forwarded_for.split(",") if hop.strip()]
+        trusted_index = len(hops) - settings.trusted_proxy_hops
+        if 0 <= trusted_index < len(hops):
+            return hops[trusted_index]
     return get_remote_address(request)
 
 

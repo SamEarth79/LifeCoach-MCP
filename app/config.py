@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_url: str
     rate_limit_requests: int = 30
     rate_limit_window_seconds: int = 60
+    trusted_proxy_hops: int = 1
 
 
 @lru_cache
