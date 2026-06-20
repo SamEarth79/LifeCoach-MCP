@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -157,7 +159,7 @@ async def list_goals(
 
 @app.patch("/goals/{goal_id}", response_model=GoalResponse)
 async def update_goal(
-    goal_id: str,
+    goal_id: UUID,
     goal_update: GoalUpdate,
     _rate_limit: None = Depends(enforce_rate_limit),
     current_user: CurrentUser = Depends(get_current_user),
@@ -193,9 +195,9 @@ async def update_goal(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found")
 
-    goal_id, title, description, created_at, updated_at = row
+    row_id, title, description, created_at, updated_at = row
     return GoalResponse(
-        id=str(goal_id),
+        id=str(row_id),
         title=title,
         description=description,
         created_at=created_at.isoformat(),
@@ -205,7 +207,7 @@ async def update_goal(
 
 @app.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_goal(
-    goal_id: str,
+    goal_id: UUID,
     _rate_limit: None = Depends(enforce_rate_limit),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> Response:

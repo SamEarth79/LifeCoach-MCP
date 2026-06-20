@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi.testclient import TestClient
 
 from app import main
@@ -108,7 +110,7 @@ def test_delete_goal_issues_no_sql_delete_statement_only_an_update(monkeypatch):
     assert "delete" not in sql_keywords
     assert "UPDATE" in executed_query
     assert "deleted_at" in executed_query
-    assert executed_params == (GOAL_ID,)
+    assert executed_params == (UUID(GOAL_ID),)
 
 
 def test_delete_goal_returns_404_when_no_row_returned(monkeypatch):
@@ -135,6 +137,29 @@ def test_delete_goal_returns_404_when_no_row_returned(monkeypatch):
 
     assert response.status_code == 404
     assert fake_connection.committed is False
+
+
+def test_delete_goal_rejects_malformed_goal_id_with_422(monkeypatch):
+    """
+    A malformed path-param goal_id must be rejected by FastAPI/Pydantic's
+    UUID validation with a clean 422, not reach the handler and raise an
+    unhandled Postgres error (which would risk leaking internal error
+    detail in a 500 response).
+    """
+    fake_connection, _ = _patch_get_connection(monkeypatch, None)
+    main.app.dependency_overrides[get_current_user] = _override_current_user()
+    client = TestClient(main.app)
+
+    try:
+        response = client.delete(
+            "/goals/not-a-uuid",
+            headers={"Authorization": "Bearer irrelevant"},
+        )
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert fake_connection.cursor_instance.executed == []
 
 
 def test_delete_goal_requires_authentication(monkeypatch):

@@ -70,6 +70,7 @@ def upgrade() -> None:
         CREATE POLICY goals_update_own ON goals
         FOR UPDATE
         USING (auth.uid() = user_id AND deleted_at IS NULL)
+        WITH CHECK (auth.uid() = user_id)
         """
     )
 

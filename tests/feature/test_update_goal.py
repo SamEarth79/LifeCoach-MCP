@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi.testclient import TestClient
 
@@ -93,7 +94,7 @@ def test_update_goal_title_only_updates_only_title(monkeypatch):
     assert "UPDATE goals" in executed_query
     assert "title = %s" in executed_query
     assert "description" not in executed_query.split("SET", 1)[1].split(",")[0]
-    assert executed_params == ("New title", GOAL_ID)
+    assert executed_params == ("New title", UUID(GOAL_ID))
     assert fake_connection.committed is True
 
 
@@ -120,7 +121,7 @@ def test_update_goal_description_only_updates_only_description(monkeypatch):
     set_clause = executed_query.split("SET", 1)[1].split("updated_at", 1)[0]
     assert "description = %s" in set_clause
     assert "title" not in set_clause
-    assert executed_params == ("New description", GOAL_ID)
+    assert executed_params == ("New description", UUID(GOAL_ID))
     assert fake_connection.committed is True
 
 
@@ -143,7 +144,7 @@ def test_update_goal_both_fields_updates_both(monkeypatch):
     executed_query, executed_params = fake_connection.cursor_instance.executed[0]
     assert "title = %s" in executed_query
     assert "description = %s" in executed_query
-    assert executed_params == ("New title", "New description", GOAL_ID)
+    assert executed_params == ("New title", "New description", UUID(GOAL_ID))
 
 
 def test_update_goal_returns_404_when_no_row_returned(monkeypatch):
@@ -170,6 +171,30 @@ def test_update_goal_returns_404_when_no_row_returned(monkeypatch):
 
     assert response.status_code == 404
     assert fake_connection.committed is False
+
+
+def test_update_goal_rejects_malformed_goal_id_with_422(monkeypatch):
+    """
+    A malformed path-param goal_id must be rejected by FastAPI/Pydantic's
+    UUID validation with a clean 422, not reach the handler and raise an
+    unhandled Postgres error (which would risk leaking internal error
+    detail in a 500 response).
+    """
+    fake_connection, _ = _patch_get_connection(monkeypatch, None)
+    main.app.dependency_overrides[get_current_user] = _override_current_user()
+    client = TestClient(main.app)
+
+    try:
+        response = client.patch(
+            "/goals/not-a-uuid",
+            json={"title": "New title"},
+            headers={"Authorization": "Bearer irrelevant"},
+        )
+    finally:
+        main.app.dependency_overrides.clear()
+
+    assert response.status_code == 422
+    assert fake_connection.cursor_instance.executed == []
 
 
 def test_update_goal_rejects_explicitly_empty_title_with_422(monkeypatch):
@@ -228,7 +253,7 @@ def test_update_goal_allows_explicit_null_description(monkeypatch):
 
     executed_query, executed_params = fake_connection.cursor_instance.executed[0]
     assert "description = %s" in executed_query
-    assert executed_params == (None, GOAL_ID)
+    assert executed_params == (None, UUID(GOAL_ID))
 
 
 def test_update_goal_omitting_title_does_not_touch_it(monkeypatch):
@@ -300,7 +325,7 @@ def test_update_goal_empty_body_is_a_no_op_select_and_returns_200_without_bumpin
     assert "SELECT" in executed_query
     assert "UPDATE" not in executed_query
     assert "updated_at = now()" not in executed_query
-    assert executed_params == (GOAL_ID,)
+    assert executed_params == (UUID(GOAL_ID),)
     assert fake_connection.committed is False
 
 
