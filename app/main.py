@@ -6,7 +6,7 @@ from slowapi.util import get_remote_address
 from app.auth import CurrentUser, get_current_user
 from app.config import get_settings
 from app.db import check_connectivity, get_rls_connection
-from app.schemas import GoalCreate, GoalResponse
+from app.schemas import GoalCreate, GoalResponse, GoalUpdate
 
 settings = get_settings()
 per_ip_rate_limit = f"{settings.rate_limit_requests}/{settings.rate_limit_window_seconds}second"
@@ -153,3 +153,51 @@ async def list_goals(
         )
         for goal_id, title, description, created_at, updated_at in rows
     ]
+
+
+@app.patch("/goals/{goal_id}", response_model=GoalResponse)
+async def update_goal(
+    goal_id: str,
+    goal_update: GoalUpdate,
+    _rate_limit: None = Depends(enforce_rate_limit),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> GoalResponse:
+    update_fields = goal_update.model_dump(exclude_unset=True)
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            if not update_fields:
+                await cursor.execute(
+                    """
+                    SELECT id, title, description, created_at, updated_at
+                    FROM goals
+                    WHERE id = %s
+                    """,
+                    (goal_id,),
+                )
+            else:
+                set_clause = ", ".join(f"{column} = %s" for column in update_fields)
+                await cursor.execute(
+                    f"""
+                    UPDATE goals
+                    SET {set_clause}, updated_at = now()
+                    WHERE id = %s
+                    RETURNING id, title, description, created_at, updated_at
+                    """,
+                    (*update_fields.values(), goal_id),
+                )
+            row = await cursor.fetchone()
+            if row is not None and update_fields:
+                await conn.commit()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found")
+
+    goal_id, title, description, created_at, updated_at = row
+    return GoalResponse(
+        id=str(goal_id),
+        title=title,
+        description=description,
+        created_at=created_at.isoformat(),
+        updated_at=updated_at.isoformat(),
+    )

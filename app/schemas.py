@@ -14,6 +14,21 @@ class GoalCreate(BaseModel):
         return stripped
 
 
+class GoalUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def reject_blank_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("title must not be empty or whitespace-only")
+        return stripped
+
+
 class GoalResponse(BaseModel):
     id: str
     title: str

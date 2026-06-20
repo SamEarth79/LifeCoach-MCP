@@ -181,3 +181,68 @@ correctly in Postgres) are unverified against a real database in this
 environment — explicit caveat in test-results.md, consistent with the
 precedent set by LFC-STORY-001's migration testing. No code defects found.
 Verdict: PASS WITH CAVEATS.
+
+## LFC-STORY-004
+
+Tested the `PATCH /goals/{goal_id}` endpoint (`app/main.py`) and the new
+`GoalUpdate` schema (`app/schemas.py`), which builds a dynamic `UPDATE`
+statement from only the fields actually present in the request body
+(`model_dump(exclude_unset=True)`), falls back to a `SELECT`-only no-op when
+the body is empty, and relies on the `goals_update_own` RLS policy plus an
+app-level "no row returned -> 404" check for authorization.
+
+What was tested and why:
+
+- AC1 (partial update, only provided fields change, `200` with full shape):
+  wrote three tests in the new `tests/feature/test_update_goal.py` —
+  title-only, description-only, and both-fields — each inspecting the
+  literal executed SQL `SET` clause and bound parameter tuple, not just the
+  response body, to prove the field that wasn't sent never appears in the
+  query or its parameters. This was the most important check in the story:
+  a test that only asserted `response.status_code == 200` would pass even
+  if the endpoint always updated both columns regardless of what was sent.
+- AC2 (nonexistent/not-owned/soft-deleted goal -> 404): mocked `fetchone()`
+  to return `None` after the `UPDATE ... RETURNING` and confirmed `404`
+  plus no `conn.commit()` call. This verifies only the app-level "RETURNING
+  yielded nothing -> 404" branch, not the `goals_update_own` RLS policy
+  itself — no live Postgres/Supabase instance is available in this
+  environment (same constraint as LFC-STORY-001 and LFC-STORY-003), so the
+  RLS half of this AC is flagged as an explicit, unverified caveat in
+  test-results.md rather than assumed to pass.
+- AC3 (empty title -> 422, null description allowed) plus the core
+  partial-update distinction: tested empty string and whitespace-only title
+  both rejected with `422` and zero DB writes (mirroring `GoalCreate`'s
+  existing validator pattern), `description: null` accepted and actually
+  bound as `None` in the executed `UPDATE`, and — the most load-bearing test
+  in the file — that *omitting* `title` entirely (vs sending `null`, which
+  the type would also accept) excludes it from both the SQL `SET` clause
+  and the bound parameters. This is the exact `exclude_unset=True` behavior
+  the story depends on to avoid clobbering fields the client didn't intend
+  to touch.
+- AC4 (missing/malformed/expired JWT -> 401): one feature-level test with no
+  `Authorization` header and no `dependency_overrides`, confirming
+  `get_current_user` is wired into this specific route. Malformed/expired
+  token handling itself remains covered by the existing
+  `tests/unit/test_auth.py` tests, consistent with prior stories' approach.
+- AC5 (same rate limiter as other routes): extended
+  `tests/feature/test_rate_limit.py` with three tests following the
+  existing `low_limit_app` fixture pattern — no fixture changes were needed
+  since it already supports `fetchone()` and `commit()` from prior stories.
+- Implementation-documented edge case (empty PATCH body is a no-op): two
+  additional tests confirm the empty-body path takes the `SELECT`-only
+  branch (no `UPDATE`, no `updated_at = now()` in the executed query, no
+  commit) and returns `200` with the unchanged row when the goal exists, or
+  `404` via the same path when the mocked `SELECT` returns nothing. This
+  wasn't a named acceptance criterion but is a documented behavior of the
+  implementation the story description called out, so it was tested
+  alongside the ACs.
+
+Result: 14 new automated tests (11 in `tests/feature/test_update_goal.py`,
+3 added to `tests/feature/test_rate_limit.py`). Full suite: 69/69 passing
+(55 pre-existing + 14 new), 0 regressions. AC1, AC3, AC4, AC5, and the
+application-side half of AC2 verified directly against the real
+implementation, including SQL/parameter-level verification of partial-update
+correctness (not just response shape). The RLS-policy half of AC2 is
+unverified against a real database in this environment — explicit caveat in
+test-results.md, consistent with the precedent set by LFC-STORY-001 and
+LFC-STORY-003. No code defects found. Verdict: PASS WITH CAVEATS.

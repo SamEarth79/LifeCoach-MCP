@@ -329,3 +329,132 @@ AC2, AC5, AC6 (application-side contract) verified directly against the
 real implementation. AC3 and AC4 (and the live-execution half of AC6's
 `ORDER BY`) are unverified against a real database in this environment —
 explicit caveat above, not a silent gap.
+
+## LFC-STORY-004
+
+**Verdict: PASS WITH CAVEATS** — see "Unverified-against-live-DB caveat"
+below for AC2 (the "RLS hides the row" half).
+
+### Layers required
+
+- Unit: not separately required. `GoalUpdate`'s partial-update/blank-title
+  validation is simple Pydantic logic, fully exercised end-to-end through
+  the feature tests below; the route itself has no other unit-testable
+  logic in isolation.
+- Feature: required and written — `PATCH /goals/{goal_id}` is a new HTTP
+  endpoint, and every acceptance criterion maps to at least one assertion.
+- E2E (Playwright): **not required**. This is a backend-only story (no new
+  UI, no page, no frontend consuming this endpoint yet) — same carve-out as
+  every other backend-only story in this feature so far.
+
+### Feature tests — `tests/feature/test_update_goal.py` (11 new)
+
+Followed the conventions of `tests/feature/test_create_goal.py` and
+`tests/feature/test_list_goals.py`: `TestClient` with
+`dependency_overrides[get_current_user]` and `monkeypatch.setattr(main,
+"get_rls_connection", ...)` with a fake async connection/cursor (extended
+with a `committed` flag to assert whether `conn.commit()` was actually
+called, since this route conditionally commits).
+
+- `test_update_goal_title_only_updates_only_title` — AC1: sends `{"title":
+  ...}` only, asserts `200` with the full updated shape, and — critically —
+  inspects the literal executed SQL's `SET` clause and the bound parameter
+  tuple to confirm `description` is never referenced and the only bound
+  values are `(new_title, goal_id)`. This proves partial-update semantics
+  actually work at the SQL level, not just that the response looks right.
+- `test_update_goal_description_only_updates_only_description` — AC1, the
+  mirror case: sends `{"description": ...}` only, confirms the `SET` clause
+  (sliced before `updated_at`) contains `description = %s` and not `title`,
+  and the bound params are `(new_description, goal_id)`.
+- `test_update_goal_both_fields_updates_both` — AC1: sends both fields,
+  confirms both appear in the `SET` clause and both are bound in the
+  correct order before `goal_id`.
+- `test_update_goal_returns_404_when_no_row_returned` — AC2 (application-side
+  half only, see caveat below): mocks `fetchone()` to return `None` after
+  the `UPDATE ... RETURNING`, confirms `404` and that `conn.commit()` was
+  never called (no point committing an `UPDATE` that affected zero rows).
+- `test_update_goal_rejects_explicitly_empty_title_with_422` — AC3: `title:
+  ""` is rejected by `GoalUpdate`'s `reject_blank_title` validator with
+  `422`, and the fake cursor's `execute` is never called.
+- `test_update_goal_rejects_whitespace_only_title_with_422` — AC3: same
+  validator catches a whitespace-only title (`"   "`), not just a literal
+  empty string, again with zero DB writes.
+- `test_update_goal_allows_explicit_null_description` — AC3: `description:
+  null` is accepted, returns `200`, and the executed `UPDATE` actually binds
+  `None` for the `description` parameter.
+- `test_update_goal_omitting_title_does_not_touch_it` — the core
+  partial-update distinction the story calls out explicitly: omitting
+  `title` from the body entirely means it never appears in the SQL `SET`
+  clause and its old value is never referenced in the bound parameters
+  (only the new `description` value and `goal_id` are bound) — proving
+  `model_dump(exclude_unset=True)` semantics, not a `None`-default that
+  would silently null out an omitted field.
+- `test_update_goal_requires_authentication` — AC4: no `Authorization`
+  header, no `dependency_overrides` for `get_current_user` → `401`,
+  confirming `get_current_user` is wired into this specific route.
+- `test_update_goal_empty_body_is_a_no_op_select_and_returns_200_without_bumping_updated_at`
+  — implementation-documented edge case: an empty PATCH body (`{}`) takes
+  the `SELECT`-only path (no `UPDATE`, no `updated_at = now()` anywhere in
+  the executed query), returns `200` with the goal's current (unchanged)
+  `updated_at`, and `conn.commit()` is never called — confirming the no-op
+  truly does nothing at the database level.
+- `test_update_goal_empty_body_returns_404_when_goal_does_not_exist` — same
+  no-op path, but the mocked `SELECT`'s `fetchone()` returns `None`,
+  confirming `404` via the same code path, and no commit.
+
+### Feature tests — `tests/feature/test_rate_limit.py` (3 new, extending the existing file)
+
+Followed the existing `low_limit_app` fixture pattern, no fixture changes
+needed (it already supports `fetchone()` + `commit()` from prior stories).
+
+- `test_update_goal_allows_requests_within_the_configured_limit` — AC5: two
+  requests under a configured limit of 2/60s both return `200`.
+- `test_update_goal_rejects_request_exceeding_the_configured_limit` — AC5: a
+  third request in the same window returns `429`.
+- `test_update_goal_enforces_the_same_configured_threshold_as_other_routes` —
+  AC5: drives both `/users/me` and `PATCH /goals/{goal_id}` to their 3rd
+  request under the same `RATE_LIMIT_REQUESTS=2` config and confirms both
+  independently return `429`, confirming the shared `enforce_rate_limit`
+  dependency and `per_ip_rate_limit` string are wired into this route too
+  (each route is its own slowapi bucket, per the precedent from
+  LFC-STORY-002/003's rate-limit tests).
+
+### Unverified-against-live-DB caveat (AC2)
+
+AC2 states that editing a goal that doesn't exist, isn't owned by the
+requester, or is already soft-deleted returns `404` "in addition to RLS
+already hiding the row." Two distinct mechanisms are named: (a) the
+app-level handling of "the `UPDATE ... RETURNING` yielded no row," and (b)
+the `goals_update_own` RLS policy (`auth.uid() = user_id AND deleted_at IS
+NULL`) actually hiding rows it shouldn't be able to touch at the Postgres
+layer.
+
+This test environment has no live Postgres/Supabase instance (same
+constraint as every other story in this feature). The feature tests above
+verify (a) directly — `test_update_goal_returns_404_when_no_row_returned`
+mocks `fetchone()` to return `None` and confirms the app turns that into a
+clean `404` with no commit. They do **not** verify (b): a mocked cursor
+returns exactly the row the test hands it regardless of `auth.uid()`,
+ownership, or `deleted_at`, so no test here proves the RLS policy itself
+actually blocks a cross-user or soft-deleted update. Per `rules/testing.md`'s
+"External-contract assumptions" section (applied to the internal RLS trust
+boundary, as in LFC-STORY-003), this half of AC2 is therefore **not
+verified** and should be re-checked against a real Supabase/Postgres
+instance — e.g. attempting an `UPDATE` as one user against another user's
+goal, and against a soft-deleted goal, through the `authenticated` role with
+`auth.uid()` set, and confirming both are rejected/return no row — before
+this story is considered fully verified for production.
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root: **69 passed, 0
+failed** (55 pre-existing + 14 new). No regressions.
+
+### Totals: 14 new automated tests (11 feature in `test_update_goal.py` + 3
+feature in `test_rate_limit.py`), 69/69 full suite passing, 0 failed. AC1,
+AC3, AC4, AC5, and the application-side half of AC2 verified directly
+against the real implementation. The RLS-policy half of AC2 is unverified
+against a real database in this environment — explicit caveat above, not a
+silent gap. No code defects found; the partial-update SQL-building logic
+was specifically checked at the SQL/parameter level (not just response
+shape) and behaves correctly.

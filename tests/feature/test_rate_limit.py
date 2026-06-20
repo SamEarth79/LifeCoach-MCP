@@ -266,6 +266,60 @@ def test_list_goals_enforces_the_same_configured_threshold_as_other_routes(low_l
     assert goals_third.status_code == 429
 
 
+def test_update_goal_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    first = client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+    second = client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_update_goal_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+    body = {"title": "Updated"}
+
+    client.patch(f"/goals/{goal_id}", json=body, headers=headers)
+    client.patch(f"/goals/{goal_id}", json=body, headers=headers)
+    third = client.patch(f"/goals/{goal_id}", json=body, headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_update_goal_enforces_the_same_configured_threshold_as_other_routes(low_limit_app):
+    """
+    AC5: PATCH /goals/{goal_id} is subject to the existing rate limiter, the
+    same as /users/me, POST /goals, and GET /goals — all routes use the
+    shared `enforce_rate_limit` dependency and the same `per_ip_rate_limit`
+    string derived from Settings, so each independently rejects a client's
+    3rd request under the same RATE_LIMIT_* configuration (slowapi tracks
+    each decorated route as its own bucket, so this asserts equivalent
+    enforcement per route rather than a single shared counter across
+    routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+    client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+    update_goal_third = client.patch(
+        f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers
+    )
+
+    assert users_me_third.status_code == 429
+    assert update_goal_third.status_code == 429
+
+
 def test_health_endpoint_is_never_rate_limited(low_limit_app):
     """
     AC4 (architectural requirement): /health must stay unlimited even when
