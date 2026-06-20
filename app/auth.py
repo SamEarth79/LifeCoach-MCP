@@ -5,7 +5,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import get_settings
-from app.db import get_connection
+from app.db import get_rls_connection
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def _decode_token(token: str) -> dict:
 
 
 async def _ensure_user_row_exists(user_id: str, email: str) -> None:
-    async with get_connection() as conn:
+    async with get_rls_connection(user_id) as conn:
         async with conn.cursor() as cursor:
             await cursor.execute(
                 """

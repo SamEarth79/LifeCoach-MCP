@@ -74,10 +74,10 @@ def low_limit_app(monkeypatch):
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def fake_get_connection():
+    async def fake_get_rls_connection(_user_id):
         yield _FakeConnection(ROW)
 
-    monkeypatch.setattr(reloaded_main, "get_connection", fake_get_connection)
+    monkeypatch.setattr(reloaded_main, "get_rls_connection", fake_get_rls_connection)
     reloaded_main.app.dependency_overrides[get_current_user] = _override_current_user()
 
     try:
@@ -140,10 +140,10 @@ def test_users_me_rate_limit_threshold_is_driven_by_settings_not_hardcoded(monke
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def fake_get_connection():
+    async def fake_get_rls_connection(_user_id):
         yield _FakeConnection(ROW)
 
-    monkeypatch.setattr(reloaded_main, "get_connection", fake_get_connection)
+    monkeypatch.setattr(reloaded_main, "get_rls_connection", fake_get_rls_connection)
     reloaded_main.app.dependency_overrides[get_current_user] = _override_current_user()
 
     try:

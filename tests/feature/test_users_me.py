@@ -48,10 +48,10 @@ def _patch_get_connection(monkeypatch, row):
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def fake_get_connection():
+    async def fake_get_rls_connection(_user_id):
         yield _FakeConnection(row)
 
-    monkeypatch.setattr(main, "get_connection", fake_get_connection)
+    monkeypatch.setattr(main, "get_rls_connection", fake_get_rls_connection)
 
 
 def test_get_users_me_returns_user_profile_for_authenticated_user(monkeypatch):

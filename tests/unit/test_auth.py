@@ -67,12 +67,12 @@ def _patch_db(monkeypatch):
     connections = []
 
     @asynccontextmanager
-    async def fake_get_connection():
+    async def fake_get_rls_connection(_user_id):
         conn = _FakeConnection(executed_queries)
         connections.append(conn)
         yield conn
 
-    monkeypatch.setattr(auth, "get_connection", fake_get_connection)
+    monkeypatch.setattr(auth, "get_rls_connection", fake_get_rls_connection)
     return executed_queries, connections
 
 

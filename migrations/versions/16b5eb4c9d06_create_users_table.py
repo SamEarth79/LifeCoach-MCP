@@ -55,9 +55,17 @@ def upgrade() -> None:
         USING (auth.uid() = id)
         """
     )
+    op.execute(
+        """
+        CREATE POLICY users_insert_own ON users
+        FOR INSERT
+        WITH CHECK (auth.uid() = id)
+        """
+    )
 
 
 def downgrade() -> None:
+    op.execute("DROP POLICY IF EXISTS users_insert_own ON users")
     op.execute("DROP POLICY IF EXISTS users_update_own ON users")
     op.execute("DROP POLICY IF EXISTS users_select_own ON users")
     op.drop_table("users")

@@ -5,7 +5,7 @@ from slowapi.util import get_remote_address
 
 from app.auth import CurrentUser, get_current_user
 from app.config import get_settings
-from app.db import check_connectivity, get_connection
+from app.db import check_connectivity, get_rls_connection
 
 settings = get_settings()
 per_ip_rate_limit = f"{settings.rate_limit_requests}/{settings.rate_limit_window_seconds}second"
@@ -32,7 +32,7 @@ async def health(response: Response) -> dict:
 async def get_my_profile(
     request: Request, current_user: CurrentUser = Depends(get_current_user)
 ) -> dict:
-    async with get_connection() as conn:
+    async with get_rls_connection(current_user.id) as conn:
         async with conn.cursor() as cursor:
             await cursor.execute(
                 """

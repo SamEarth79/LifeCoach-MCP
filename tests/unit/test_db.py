@@ -26,6 +26,28 @@ class _FakeConnection:
         return _FakeCursor()
 
 
+class _RecordingCursor:
+    def __init__(self, recorder):
+        self._recorder = recorder
+
+    async def execute(self, query, params=None):
+        self._recorder.append((query, params))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+
+class _RecordingConnection:
+    def __init__(self, recorder):
+        self._recorder = recorder
+
+    def cursor(self):
+        return _RecordingCursor(self._recorder)
+
+
 @pytest.mark.asyncio
 async def test_check_connectivity_returns_true_when_query_succeeds(monkeypatch):
     @asynccontextmanager
@@ -66,3 +88,23 @@ async def test_check_connectivity_returns_false_on_query_error(monkeypatch):
     monkeypatch.setattr(db, "get_connection", fake_get_connection)
 
     assert await db.check_connectivity() is False
+
+
+@pytest.mark.asyncio
+async def test_get_rls_connection_sets_role_and_jwt_claim_before_yielding(monkeypatch):
+    executed_queries = []
+    user_id = "11111111-1111-1111-1111-111111111111"
+
+    @asynccontextmanager
+    async def fake_get_connection():
+        yield _RecordingConnection(executed_queries)
+
+    monkeypatch.setattr(db, "get_connection", fake_get_connection)
+
+    async with db.get_rls_connection(user_id) as conn:
+        assert isinstance(conn, _RecordingConnection)
+
+    assert executed_queries == [
+        ("SET LOCAL ROLE authenticated", None),
+        ("SELECT set_config('request.jwt.claim.sub', %s, true)", (user_id,)),
+    ]
