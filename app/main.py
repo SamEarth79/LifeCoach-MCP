@@ -201,3 +201,30 @@ async def update_goal(
         created_at=created_at.isoformat(),
         updated_at=updated_at.isoformat(),
     )
+
+
+@app.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_goal(
+    goal_id: str,
+    _rate_limit: None = Depends(enforce_rate_limit),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> Response:
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE goals
+                SET deleted_at = now()
+                WHERE id = %s AND deleted_at IS NULL
+                RETURNING id
+                """,
+                (goal_id,),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                await conn.commit()
+
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found")
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

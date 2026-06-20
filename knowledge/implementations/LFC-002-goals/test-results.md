@@ -458,3 +458,191 @@ against a real database in this environment — explicit caveat above, not a
 silent gap. No code defects found; the partial-update SQL-building logic
 was specifically checked at the SQL/parameter level (not just response
 shape) and behaves correctly.
+
+## LFC-STORY-005
+
+**Verdict: PASS WITH CAVEATS** — see "Unverified-against-live-DB caveat"
+below for AC3. This is the final story in LFC-002-goals.
+
+### Layers required
+
+- Unit: not separately required. `DELETE /goals/{goal_id}` introduces no
+  new business logic beyond the established "RETURNING yielded no row ->
+  404" pattern already used by `PATCH /goals/{goal_id}` — a unit test in
+  isolation would duplicate the feature tests below without mocking
+  anything new.
+- Feature: required and written — `DELETE /goals/{goal_id}` is a new HTTP
+  endpoint, and every testable acceptance criterion maps to at least one
+  assertion (see below; AC4 is addressed separately, see "AC4" section).
+- E2E (Playwright): **not required**. This is a backend-only story (no new
+  UI, no page, no frontend consuming this endpoint yet) — same carve-out as
+  every other story in this feature.
+
+### Feature tests — `tests/feature/test_delete_goal.py` (4 new)
+
+Followed the conventions of `tests/feature/test_update_goal.py`: `TestClient`
+with `dependency_overrides[get_current_user]` and `monkeypatch.setattr(main,
+"get_rls_connection", ...)` with a fake async connection/cursor (carrying a
+`committed` flag, since this route conditionally commits only when a row
+was actually affected).
+
+- `test_delete_goal_returns_204_with_empty_body` — AC1: valid JWT against an
+  owned goal returns `204`, `response.content == b""` (genuinely empty body,
+  not an empty JSON object/string), `conn.commit()` was called, and the
+  verified `current_user.id` was the value passed into `get_rls_connection`.
+- `test_delete_goal_issues_no_sql_delete_statement_only_an_update` — **AC2,
+  the story's most important and explicit requirement**: inspects the
+  literal SQL string passed to the mocked cursor's `execute()` call.
+  Splits the lowercased query into whitespace-delimited tokens and asserts
+  the standalone token `"delete"` never appears (a naive substring check
+  would have falsely matched the column name `deleted_at`, which legitimately
+  appears in a correct `UPDATE` — verified this distinction explicitly by
+  first observing the substring-only version fail against the real `UPDATE
+  ... SET deleted_at = now() ... WHERE ... deleted_at IS NULL` query, then
+  switching to token-based matching). Also asserts the query contains
+  `"UPDATE"` and `"deleted_at"`, and the bound parameter is exactly
+  `(GOAL_ID,)`. This directly confirms the implementation never issues a
+  literal SQL `DELETE` against the `goals` table — only an `UPDATE` setting
+  `deleted_at`.
+- `test_delete_goal_returns_404_when_no_row_returned` — AC3 (application-side
+  half only, see caveat below): mocks `fetchone()` to return `None` after
+  the `UPDATE ... RETURNING`, confirms `404` and that `conn.commit()` was
+  never called.
+- `test_delete_goal_requires_authentication` — AC5: no `Authorization`
+  header, no `dependency_overrides` for `get_current_user` -> `401`,
+  confirming `get_current_user` is wired into this specific route, mirroring
+  every prior story's equivalent test.
+
+### Feature tests — `tests/feature/test_rate_limit.py` (3 new, extending the existing file)
+
+Followed the existing `low_limit_app` fixture pattern — no fixture changes
+needed, since it already supports `fetchone()` and `commit()` from prior
+stories and `DELETE /goals/{goal_id}` needs nothing further.
+
+- `test_delete_goal_allows_requests_within_the_configured_limit` — AC6: two
+  requests under a configured limit of 2/60s both return `204`.
+- `test_delete_goal_rejects_request_exceeding_the_configured_limit` — AC6: a
+  third request in the same window returns `429`.
+- `test_delete_goal_enforces_the_same_configured_threshold_as_other_routes` —
+  AC6: drives both `/users/me` and `DELETE /goals/{goal_id}` to their 3rd
+  request under the same `RATE_LIMIT_REQUESTS=2` config and confirms both
+  independently return `429`, confirming the shared `enforce_rate_limit`
+  dependency and `per_ip_rate_limit` string are wired into this route too.
+
+### AC4 — "after soft-deletion, the goal no longer appears in GET /goals and
+PATCH returns 404"
+
+AC4 is fundamentally an RLS-policy behavior: the `goals_select_own` and
+`goals_update_own` policies (both `... AND deleted_at IS NULL`) are what
+actually exclude a soft-deleted row from `GET /goals` and from being
+matched by a subsequent `PATCH`'s `UPDATE ... WHERE id = %s` — `DELETE
+/goals/{goal_id}`'s own correctness (does it actually set `deleted_at`, does
+it never hard-delete) is fully covered by AC1/AC2 above, and `GET /goals`'s
+and `PATCH /goals/{goal_id}`'s own "no rows visible -> empty list / 404"
+behavior is already directly tested in `tests/feature/test_list_goals.py`
+and `tests/feature/test_update_goal.py` (LFC-STORY-003/004). Writing a new
+"AC4 test" with a mocked cursor would necessarily mock `fetchall()`/
+`fetchone()` to return what AC4 expects without ever exercising the RLS
+policy that's actually responsible for producing that result against real
+data — that would be a self-consistency test proving nothing beyond what
+LFC-STORY-003/004's existing tests already prove, per `rules/testing.md`'s
+"External-contract assumptions" guidance (applied here to the internal RLS
+trust boundary, as in every prior story in this feature). No new test was
+written for AC4; it is **covered by composition**: DELETE's own correctness
+(AC1/AC2 above) + GET/PATCH's already-tested empty-result handling
+(LFC-STORY-003/004) + the RLS policies themselves (created in
+LFC-STORY-001's migration, with their own dry-run SQL verification — still
+unverified against a live database, same as every other RLS-dependent
+behavior in this feature). Flagged explicitly rather than papered over with
+a misleading mock-based test.
+
+### Unverified-against-live-DB caveat (AC3, and by extension AC4)
+
+AC3 ("deleting a goal that doesn't exist, isn't owned by the requester, or
+is already soft-deleted returns 404") is enforced by two mechanisms: (a) the
+app-level "the `UPDATE ... RETURNING` yielded no row -> 404" handling, and
+(b) the fact that an `UPDATE ... WHERE id = %s AND deleted_at IS NULL` run
+through the RLS-scoped connection will only ever match a row the requester
+actually owns and that isn't already soft-deleted, at the Postgres layer.
+
+This test environment has no live Postgres/Supabase instance (same
+constraint as every other story in this feature — no Docker daemon, no
+local `psql`). `test_delete_goal_returns_404_when_no_row_returned` verifies
+(a) directly. It does **not** verify (b): a mocked cursor returns exactly
+the row the test hands it regardless of `auth.uid()`, ownership, or
+`deleted_at`, so no test here proves RLS itself actually blocks a cross-user
+or already-soft-deleted delete attempt from matching. Per
+`rules/testing.md`'s "External-contract assumptions" section, this half of
+AC3 (and AC4's RLS-dependent half, see above) is therefore **not verified**
+and should be re-checked against a real Supabase/Postgres instance —
+attempting a `DELETE` as one user against another user's goal and against
+an already-soft-deleted goal, through the `authenticated` role with
+`auth.uid()` set, confirming both return `404`, then confirming the
+soft-deleted goal is absent from a subsequent `GET /goals` and a subsequent
+`PATCH` against it returns `404` — before this story is considered fully
+verified for production.
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root: **76 passed, 0
+failed** (69 pre-existing + 7 new). Ran a second time to confirm a clean,
+deterministic result with no flakiness: **76 passed, 0 failed** again.
+
+### Totals: 7 new automated tests (4 feature in `test_delete_goal.py` + 3
+feature in `test_rate_limit.py`), 76/76 full suite passing, 0 failed. AC1,
+AC2, AC5, AC6 verified directly against the real implementation — AC2 in
+particular was verified at the literal-SQL-string level, confirming no
+`DELETE` statement is ever issued, only an `UPDATE` setting `deleted_at`.
+The RLS-policy half of AC3 is unverified against a real database in this
+environment — explicit caveat above. AC4 is covered by composition of
+already-tested GET/PATCH behavior plus this story's own DELETE correctness,
+not by a new dedicated test — explained above, not silently assumed. No
+code defects found.
+
+## Feature Summary — LFC-002-goals
+
+All 5 stories in this feature (LFC-STORY-001 through LFC-STORY-005) are now
+implemented and tested:
+
+- LFC-STORY-001: `goals` table migration with RLS (PASS WITH CAVEATS)
+- LFC-STORY-002: `POST /goals` create endpoint (PASS)
+- LFC-STORY-003: `GET /goals` list endpoint (PASS WITH CAVEATS)
+- LFC-STORY-004: `PATCH /goals/{goal_id}` partial-update endpoint (PASS WITH CAVEATS)
+- LFC-STORY-005: `DELETE /goals/{goal_id}` soft-delete endpoint (PASS WITH CAVEATS)
+
+**Total new automated tests across the feature: 39** (0 + 10 + 8 + 14 + 7),
+all feature-layer tests (no unit or E2E tests were required for any story
+in this feature — every story is backend-only with no new user-facing UI,
+and no story introduced unit-testable logic beyond what the feature tests
+already exercise at the HTTP-handler level). Final full-suite run: **76
+passed, 0 failed**, run twice consecutively with identical results — no
+flakiness, no regressions across the whole feature.
+
+**Recurring caveat — RLS unverified against a live database:** every story
+in this feature except LFC-STORY-002 (the simple create endpoint, which has
+no RLS-dependent read/update/delete path to mis-scope) carries the same
+unresolved environment limitation: no Docker daemon and no local `psql` were
+available in this sandbox, so no story's RLS-policy behavior was ever
+exercised against a real Postgres/Supabase instance with `auth.uid()`
+actually set under the `authenticated` role. Specifically still unverified
+end-to-end:
+
+- LFC-STORY-001: the three RLS policies' (`goals_select_own`,
+  `goals_insert_own`, `goals_update_own`) actual runtime behavior — verified
+  only via Alembic's `--sql` dry-run, never executed.
+- LFC-STORY-003: `goals_select_own` actually excluding soft-deleted and
+  other-users' rows from `GET /goals`.
+- LFC-STORY-004: `goals_update_own` actually blocking a cross-user or
+  soft-deleted `PATCH`.
+- LFC-STORY-005: the same `goals_update_own`-equivalent scoping for
+  `DELETE`'s underlying `UPDATE`, and the composed AC4 behavior (soft-deleted
+  goal disappearing from `GET`/`PATCH`).
+
+Before this feature is considered production-ready, it should be
+re-verified end-to-end against a real Supabase/Postgres instance: seed two
+users' goals plus a soft-deleted goal, exercise `GET`, `POST`, `PATCH`, and
+`DELETE` through the `authenticated` role with `auth.uid()` actually set for
+each user, and confirm cross-user and soft-deleted rows are correctly
+excluded/rejected at every endpoint. This is a known, explicitly-flagged gap
+carried consistently across the feature's test results — not a silent
+assumption.

@@ -246,3 +246,82 @@ correctness (not just response shape). The RLS-policy half of AC2 is
 unverified against a real database in this environment — explicit caveat in
 test-results.md, consistent with the precedent set by LFC-STORY-001 and
 LFC-STORY-003. No code defects found. Verdict: PASS WITH CAVEATS.
+
+## LFC-STORY-005
+
+Tested the `DELETE /goals/{goal_id}` endpoint (`app/main.py`), the final
+story in this feature. The implementation issues `UPDATE goals SET
+deleted_at = now() WHERE id = %s AND deleted_at IS NULL RETURNING id`
+through the RLS-scoped connection, never a SQL `DELETE`, and returns `204`
+with an explicit empty `Response` on success or `404` when `RETURNING`
+yields no row.
+
+What was tested and why:
+
+- AC1 (204 with no body) and AC6 (rate-limited like other routes): one
+  feature test confirms `204` plus `response.content == b""` (not just
+  "no JSON keys" — a genuinely empty body), `conn.commit()` called, and the
+  verified user id passed through to `get_rls_connection`. Three more tests
+  extend `tests/feature/test_rate_limit.py` following the existing
+  `low_limit_app` fixture pattern, no fixture changes needed.
+- AC2, the story's most important and explicitly called-out requirement
+  (no SQL DELETE ever issued): inspected the literal SQL string passed to
+  the mocked cursor's `execute()`. First attempt used a plain substring
+  check (`"delete" not in query.lower()`), which **failed** against the
+  actual correct implementation — `deleted_at` legitimately contains the
+  substring `delete`. This was a genuine test-design bug caught by running
+  it, not the implementation being wrong. Fixed by tokenizing the lowercased
+  query on whitespace and asserting the standalone word `"delete"` never
+  appears as its own token, while `"UPDATE"` and `"deleted_at"` both do.
+  This is the strongest, most literal verification possible short of a live
+  database query log, and it directly confirms the implementation never
+  issues a hard `DELETE` against the `goals` table.
+- AC3 (nonexistent/not-owned/already-soft-deleted -> 404): mocked
+  `fetchone()` to return `None`, confirmed `404` and no `conn.commit()`
+  call — this is the same app-level "RETURNING yielded nothing" pattern
+  already used for `PATCH /goals/{goal_id}`'s 404 case in LFC-STORY-004.
+  Only the application-side half is verified; the RLS-policy half (does an
+  `UPDATE` issued by one user against another user's or an
+  already-soft-deleted goal actually fail to match a row at the Postgres
+  layer) is unverified — same constraint as every other story in this
+  feature, no live Postgres/Supabase instance available.
+- AC4 (soft-deleted goal disappears from GET /goals, PATCH returns 404):
+  this is fundamentally RLS-policy behavior (`goals_select_own` and
+  `goals_update_own`'s `deleted_at IS NULL` clauses), and `GET /goals` /
+  `PATCH /goals/{goal_id}`'s own "no rows visible -> empty list / 404"
+  behavior is already directly tested in LFC-STORY-003 and LFC-STORY-004.
+  Writing a new mock-based "AC4 test" here would only prove a mocked
+  cursor returns what the test tells it to, not that RLS actually produces
+  that result against real data — exactly the kind of misleading
+  self-consistency test `rules/testing.md` warns against. No new test was
+  written for AC4; it's covered by composition of this story's own
+  DELETE-correctness tests (AC1/AC2/AC3) plus GET/PATCH's already-tested
+  empty-result handling, with the underlying RLS behavior itself still
+  flagged as unverified against a live database (consistent with every
+  other RLS-dependent claim in this feature).
+- AC5 (missing/malformed/expired JWT -> 401): one feature-level test with
+  no `Authorization` header and no `dependency_overrides`, confirming
+  `get_current_user` is wired into this specific route, mirroring every
+  prior story's equivalent test.
+
+Result: 7 new automated tests (4 in `tests/feature/test_delete_goal.py`, 3
+added to `tests/feature/test_rate_limit.py`). Full suite: 76/76 passing (69
+pre-existing + 7 new), 0 regressions, run twice consecutively with
+identical results. AC1, AC2, AC5, AC6 verified directly against the real
+implementation, with AC2 specifically confirmed at the literal-SQL-string
+level (no `DELETE` statement, only `UPDATE ... SET deleted_at`). The
+RLS-policy half of AC3 is unverified against a real database in this
+environment — explicit caveat in test-results.md. AC4 is covered by
+composition rather than a new dedicated test, with the reasoning spelled
+out above rather than silently assumed. No code defects found — the
+implementation correctly avoids a hard delete in every code path checked.
+Verdict: PASS WITH CAVEATS.
+
+This is the final story in LFC-002-goals. Across all 5 stories: 39 new
+automated tests total, 76/76 in the full suite passing, 0 regressions
+introduced by any story. The one consistent, explicitly-flagged risk
+carried through the whole feature is that no story's RLS-policy behavior
+was ever exercised against a real running Postgres/Supabase instance — see
+the "Feature Summary" section in test-results.md for the full rundown of
+what specifically remains unverified and what re-verification against a
+live database should cover before this feature is trusted in production.
