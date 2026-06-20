@@ -7,7 +7,6 @@ from app.config import Settings, get_settings
 ENV_VARS = {
     "SUPABASE_URL": "https://example.supabase.co",
     "SUPABASE_ANON_KEY": "anon-key",
-    "SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
     "SUPABASE_JWT_SECRET": "jwt-secret",
     "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
 }
@@ -21,7 +20,6 @@ def test_loads_settings_from_environment_variables(monkeypatch):
 
     assert settings.supabase_url == ENV_VARS["SUPABASE_URL"]
     assert settings.supabase_anon_key == ENV_VARS["SUPABASE_ANON_KEY"]
-    assert settings.supabase_service_role_key == ENV_VARS["SUPABASE_SERVICE_ROLE_KEY"]
     assert settings.supabase_jwt_secret == ENV_VARS["SUPABASE_JWT_SECRET"]
     assert settings.database_url == ENV_VARS["DATABASE_URL"]
 

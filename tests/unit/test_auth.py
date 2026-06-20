@@ -54,7 +54,6 @@ class _FakeConnection:
 def _env_settings(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-key")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-key")
     monkeypatch.setenv("SUPABASE_JWT_SECRET", JWT_SECRET)
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/db")
     get_settings.cache_clear()
