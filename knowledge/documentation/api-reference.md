@@ -380,3 +380,178 @@ serialized. `id` and `goal_id` are also not included.
 | Per-IP rate limit exceeded | Rejected before any database call. |
 | `goal_id` is not a valid UUID | Validation error raised before any database call. |
 | `goal_id` does not exist, isn't owned by the caller, or has no updates | Returns `[]` — not an error. Cross-user/cross-goal isolation is enforced entirely by the `updates_select_own` RLS policy, not by an application-level filter. |
+
+---
+
+### Tool: `get_home_view`
+
+Returns the home screen UI for the signed-in user as a rendered HTML
+resource: a greeting, a card per active goal with its progress, and
+distinct "create a new goal" / "just want to talk?" entries. Not a source
+of goal data for an MCP client's own reasoning — use `list_updates`/other
+tools for that.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+No parameters. The user is identified entirely from the verified JWT.
+
+#### Output
+
+An MCP `EmbeddedResource`:
+
+```json
+{
+  "type": "resource",
+  "resource": {
+    "uri": "ui://home-view",
+    "mimeType": "text/html",
+    "text": "<!DOCTYPE html>..."
+  }
+}
+```
+
+The rendered HTML shows one card per active goal (title + a circular
+progress indicator, showing a real percentage or a dashed "no estimate
+yet" treatment when `progress_percent` is `NULL`, plus an "Updated <date>"
+line when the goal has at least one recorded update), a "create a new
+goal" entry and a "just want to talk?" entry (both inject a chat message
+via `postMessage` rather than calling a tool), or an empty-state variant
+when the caller has zero active goals. Clicking a goal card invokes
+`get_goal_detail_view` directly via `postMessage` — **unverified against a
+live MCP-UI host**, see this feature's technical doc for the open risk.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| The caller's `users` row is missing, or any unhandled error occurs while loading the screen | Handled internally — returns a failure-state `EmbeddedResource` describing the problem in user-safe language, rather than raising. Never an `isError: true` result for this case. |
+
+---
+
+### Tool: `get_goal_detail_view`
+
+Returns the goal-detail screen UI for one of the caller's own goals as a
+rendered HTML resource: full title/description, progress, a short list of
+recent updates, a "continue this conversation" action, and a delete action
+behind an explicit confirm step.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `goal_id` | `string` (UUID) | yes | Must be a valid UUID. |
+
+#### Output
+
+Same `EmbeddedResource` shape as `get_home_view`, with `uri:
+"ui://goal-detail-view"`. The rendered HTML shows the goal's full
+title/description, its progress indicator, up to 5 most recent updates
+(`content` + date only, never `transcript` — same discipline as
+`list_updates`, with an explicit "No updates yet." message when there are
+none), a "continue this conversation" action (injects a chat message
+referencing the goal by title, never a tool call), and a two-stage
+delete-confirm action whose confirmed step calls `delete_goal` directly via
+`postMessage` — **unverified against a live MCP-UI host**, see this
+feature's technical doc.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `goal_id` is not a valid UUID | Validation error raised before any database call. |
+| `goal_id` does not exist, isn't owned by the caller, or is soft-deleted | Handled internally — returns a failure-state `EmbeddedResource` ("This goal isn't available.") rather than raising. Never an `isError: true` result for this case. |
+| Any unhandled error occurs while loading the screen | Same handled-failure behavior as above. |
+
+---
+
+### Tool: `set_goal_progress`
+
+Lets the calling coaching AI record its own periodic self-assessment of
+progress (0-100) on one of the caller's own goals, after a conversation
+where it judges progress changed. This is for the AI's own internal
+bookkeeping — the rendered UI never calls this tool directly, and it
+should not be presented to the user as something they asked for or need to
+confirm.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `goal_id` | `string` (UUID) | yes | Must be a valid UUID; must reference a goal owned by the caller. |
+| `percentage` | `integer` | yes | `0`-`100` inclusive. |
+| `rationale` | `string` | no | Up to 500 characters, blank-to-`null`. Validated but not persisted — there is no `rationale` column on `goals`. |
+
+#### Output
+
+```json
+{
+  "goal_id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+  "percentage": 42
+}
+```
+
+A plain dict, not a UI resource — this tool is never UI-initiated.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `goal_id` is not a valid UUID, `percentage` is outside `0`-`100`, or `rationale` exceeds 500 characters | Validation error raised before any database call. |
+| `goal_id` does not exist, is not owned by the caller, or is soft-deleted | The RLS `WITH CHECK` on `goals_update_own` causes the `UPDATE` to return no row; the tool raises an error rather than silently succeeding. |
+
+---
+
+### Tool: `delete_goal`
+
+Soft-deletes one of the caller's own goals — identical SQL semantics to the
+existing REST `DELETE /goals/{id}` (an `UPDATE ... SET deleted_at = now()`,
+never a SQL `DELETE`). Intended to be called from the goal-detail view's
+confirm-delete UI action after the user has explicitly confirmed, not
+invoked proactively mid-conversation. On success, returns a refreshed home
+screen resource reflecting the deletion, rather than a plain
+acknowledgement.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `goal_id` | `string` (UUID) | yes | Must be a valid UUID; must reference a goal owned by the caller. |
+
+#### Output
+
+Same `EmbeddedResource` shape as `get_home_view` (`uri: "ui://home-view"`)
+— the home view, refreshed to exclude the deleted goal — produced via the
+same `_fetch_home_view_data`/`_build_home_view_resource` helpers
+`get_home_view` itself uses, not a parallel implementation.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `goal_id` is not a valid UUID | Validation error raised before any database call. |
+| `goal_id` does not exist, is not owned by the caller, or is already soft-deleted | The RLS-scoped `UPDATE` returns no row; the tool raises an error with no commit and no home-view refresh attempted. |
+| The post-delete home-view refresh itself fails (e.g. an unhandled error reading the caller's updated goal list) | Handled internally — returns a failure-state `EmbeddedResource` rather than raising, even though the delete itself already succeeded and committed. |
