@@ -66,6 +66,34 @@ async def _ensure_user_row_exists(user_id: str, email: str) -> None:
         await conn.commit()
 
 
+async def verify_bearer_token(authorization_header: str | None) -> CurrentUser:
+    """Verify a raw `Authorization` header value and resolve the calling user.
+
+    Shared by both the REST `get_current_user` dependency and the MCP tool
+    layer, so JWT verification logic exists in exactly one place.
+    """
+    if authorization_header is None:
+        logger.warning("JWT verification failed: missing Authorization header")
+        raise _unauthorized()
+
+    scheme, _, token = authorization_header.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        logger.warning("JWT verification failed: missing or malformed Authorization header")
+        raise _unauthorized()
+
+    payload = _decode_token(token)
+
+    user_id = payload.get("sub")
+    email = payload.get("email")
+    if not user_id or not email:
+        logger.warning("JWT verification failed: missing sub or email claim")
+        raise _unauthorized()
+
+    await _ensure_user_row_exists(user_id, email)
+
+    return CurrentUser(id=user_id, email=email)
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> CurrentUser:

@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main as main_module
+from app import rate_limit as rate_limit_module
 from app.auth import CurrentUser, get_current_user
 from app.config import get_settings
 
@@ -55,26 +56,30 @@ def _override_current_user():
 
 def _reload_main_with_real_settings():
     """
-    Restores app.main to a module state built from the real environment
-    (the same .env-backed Settings every other test file expects), since
-    app.main is a process-wide singleton module and tests that reload it
-    with overridden env vars must put it back exactly as they found it.
+    Restores app.main (and the app.rate_limit module it depends on) to a
+    module state built from the real environment (the same .env-backed
+    Settings every other test file expects), since both are process-wide
+    singleton modules and tests that reload them with overridden env vars
+    must put them back exactly as they found them.
     """
     get_settings.cache_clear()
+    importlib.reload(rate_limit_module)
     return importlib.reload(main_module)
 
 
 @pytest.fixture
 def low_limit_app(monkeypatch):
     """
-    Reloads app.main with a low, deterministic rate limit so tests don't
-    need to burn through the real default of 30 requests/60s, and so the
-    limit module/decorator picks up the overridden Settings at import time.
+    Reloads app.rate_limit and app.main with a low, deterministic rate
+    limit so tests don't need to burn through the real default of 30
+    requests/60s, and so the limiter (defined in app.rate_limit, imported
+    by app.main) picks up the overridden Settings at import time.
     """
     monkeypatch.setenv("RATE_LIMIT_REQUESTS", "2")
     monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "60")
     get_settings.cache_clear()
 
+    importlib.reload(rate_limit_module)
     reloaded_main = importlib.reload(main_module)
 
     from contextlib import asynccontextmanager
@@ -141,6 +146,7 @@ def test_users_me_rate_limit_threshold_is_driven_by_settings_not_hardcoded(monke
     monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "60")
     get_settings.cache_clear()
 
+    importlib.reload(rate_limit_module)
     reloaded_main = importlib.reload(main_module)
 
     from contextlib import asynccontextmanager
