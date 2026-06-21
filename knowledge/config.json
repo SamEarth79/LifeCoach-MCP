@@ -1,9 +1,10 @@
 {
   "prefix": "LFC",
-  "nextFeatureNumber": 4,
+  "nextFeatureNumber": 5,
   "nextStoryNumber": {
     "LFC-001-auth-infra-baseline": 5,
     "LFC-002-goals": 6,
-    "LFC-003-updates": 4
+    "LFC-003-updates": 4,
+    "LFC-004-mcp-ui-home-goal-views": 6
   }
 }
