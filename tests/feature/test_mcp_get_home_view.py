@@ -178,8 +178,8 @@ async def test_get_home_view_through_live_mcp_transport_returns_html_resource_wi
 ):
     user_row = ("Sam", EMAIL)
     goal_rows = [(GOAL_ID, "Run a 5k", 42)]
-    update_row = (CREATED_AT,)
-    fake_connection, captured = _patch_db(monkeypatch, [user_row, goal_rows, update_row])
+    last_updated_rows = [(GOAL_ID, CREATED_AT)]
+    fake_connection, captured = _patch_db(monkeypatch, [user_row, goal_rows, last_updated_rows])
     _patch_user_upsert(monkeypatch)
     token = _make_token()
 

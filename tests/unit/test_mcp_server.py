@@ -488,12 +488,13 @@ async def test_set_goal_progress_returns_plain_dict_not_ui_resource(monkeypatch)
 
 
 class _SequencedCursor:
-    """Fake cursor for `get_home_view`'s interleaved query pattern: one
-    `fetchone` for the user row, one `fetchall` for the goal rows, then one
-    `fetchone` per goal for its most recent update. Each entry in
-    `responses` is consumed in order regardless of whether the caller calls
-    `fetchone` or `fetchall` — the test supplies responses in the exact
-    order the production code is expected to issue queries.
+    """Fake cursor for `get_home_view`'s query pattern: one `fetchone` for
+    the user row, one `fetchall` for the goal rows, then (only if there are
+    any goals) one `fetchall` for the batched per-goal most-recent-update
+    lookup (`[(goal_id, last_created_at), ...]`). Each entry in `responses`
+    is consumed in order regardless of whether the caller calls `fetchone`
+    or `fetchall` — the test supplies responses in the exact order the
+    production code is expected to issue queries.
     """
 
     def __init__(self, responses):
@@ -545,9 +546,9 @@ def _patch_db_sequenced(monkeypatch, responses):
 async def test_get_home_view_returns_embedded_resource_with_greeting_and_goal_cards(monkeypatch):
     user_row = ("Sam", "sam@example.com")
     goal_rows = [(GOAL_ID, "Run a 5k", 42)]
-    update_row = (CREATED_AT,)
+    last_updated_rows = [(GOAL_ID, CREATED_AT)]
     fake_connection, captured = _patch_db_sequenced(
-        monkeypatch, [user_row, goal_rows, update_row]
+        monkeypatch, [user_row, goal_rows, last_updated_rows]
     )
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
@@ -591,9 +592,9 @@ async def test_get_home_view_returns_empty_state_for_zero_active_goals(monkeypat
 async def test_get_home_view_goal_query_has_no_app_level_user_id_or_deleted_at_clause(monkeypatch):
     user_row = ("Sam", "sam@example.com")
     goal_rows = [(GOAL_ID, "Run a 5k", None)]
-    update_row = None
+    last_updated_rows: list[tuple] = []
     fake_connection, captured = _patch_db_sequenced(
-        monkeypatch, [user_row, goal_rows, update_row]
+        monkeypatch, [user_row, goal_rows, last_updated_rows]
     )
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
@@ -611,8 +612,8 @@ async def test_get_home_view_goal_query_has_no_app_level_user_id_or_deleted_at_c
 async def test_get_home_view_renders_no_estimate_yet_when_progress_percent_is_null(monkeypatch):
     user_row = ("Sam", "sam@example.com")
     goal_rows = [(GOAL_ID, "Run a 5k", None)]
-    update_row = None
-    _patch_db_sequenced(monkeypatch, [user_row, goal_rows, update_row])
+    last_updated_rows: list[tuple] = []
+    _patch_db_sequenced(monkeypatch, [user_row, goal_rows, last_updated_rows])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -1116,7 +1117,7 @@ async def test_delete_goal_on_success_returns_refreshed_home_view_resource_exclu
     refresh_responses = [
         ("Sam", "sam@example.com"),
         [(surviving_goal_id, "Read a book", 10)],
-        None,
+        [],
     ]
     fake_connection, captured = _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
     _patch_auth(monkeypatch)

@@ -234,29 +234,32 @@ async def _fetch_home_view_data(user_id: str) -> HomeViewData:
             )
             goal_rows = await cursor.fetchall()
 
-            goals: list[HomeGoalCard] = []
-            for goal_id, title, progress_percent in goal_rows:
+            goal_ids = [str(goal_id) for goal_id, _, _ in goal_rows]
+            last_updated_by_goal_id: dict[str, str] = {}
+            if goal_ids:
                 await cursor.execute(
                     """
-                    SELECT created_at
+                    SELECT goal_id, MAX(created_at)
                     FROM updates
-                    WHERE goal_id = %s
-                    ORDER BY created_at DESC
-                    LIMIT 1
+                    WHERE goal_id = ANY(%s)
+                    GROUP BY goal_id
                     """,
-                    (str(goal_id),),
+                    (goal_ids,),
                 )
-                update_row = await cursor.fetchone()
-                last_updated_at = update_row[0].isoformat() if update_row is not None else None
+                last_updated_by_goal_id = {
+                    str(goal_id): last_created_at.isoformat()
+                    for goal_id, last_created_at in await cursor.fetchall()
+                }
 
-                goals.append(
-                    HomeGoalCard(
-                        id=str(goal_id),
-                        title=title,
-                        progress_percent=progress_percent,
-                        last_updated_at=last_updated_at,
-                    )
+            goals = [
+                HomeGoalCard(
+                    id=str(goal_id),
+                    title=title,
+                    progress_percent=progress_percent,
+                    last_updated_at=last_updated_by_goal_id.get(str(goal_id)),
                 )
+                for goal_id, title, progress_percent in goal_rows
+            ]
 
     return HomeViewData(greeting_name=display_name or email, goals=goals)
 
@@ -416,13 +419,11 @@ async def delete_goal(goal_id: str, ctx: Context) -> EmbeddedResource:
                 (str(validated_goal_id),),
             )
             row = await cursor.fetchone()
-            if row is not None:
-                await conn.commit()
-
-    if row is None:
-        raise ValueError(
-            "goal_id does not exist, is not owned by the caller, or is already deleted"
-        )
+            if row is None:
+                raise ValueError(
+                    "goal_id does not exist, is not owned by the caller, or is already deleted"
+                )
+        await conn.commit()
 
     try:
         home_view_data = await _fetch_home_view_data(current_user.id)

@@ -191,7 +191,7 @@ async def test_delete_goal_through_live_mcp_transport_returns_refreshed_home_vie
     refresh_responses = [
         ("Sam", EMAIL),
         [(SURVIVING_GOAL_ID, "Read a book", 10)],
-        None,
+        [],
     ]
     fake_connection, captured = _patch_db(monkeypatch, (GOAL_ID,), refresh_responses)
     _patch_user_upsert(monkeypatch)
