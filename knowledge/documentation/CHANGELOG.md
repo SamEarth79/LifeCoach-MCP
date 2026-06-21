@@ -7,6 +7,27 @@ All notable changes to this project are documented in this file, following
 
 ### Added
 
+- MCP-UI home and goal-detail views (LFC-004): two interactive screens
+  rendered server-side as HTML and returned from MCP tool calls, viewable
+  inside an MCP-UI-capable host — the first feature with any rendered UI
+  surface, as opposed to plain conversational tool results. A home screen
+  shows a greeting, a card per active goal with self-reported progress, a
+  "create a new goal" entry, and a "just want to talk?" entry; a
+  goal-detail screen shows full title/description, progress, recent
+  updates, a "continue this conversation" action, and a delete action
+  behind a confirm step.
+- `get_home_view` MCP tool — returns the home screen as a `ui://home-view`
+  HTML resource.
+- `get_goal_detail_view` MCP tool — returns the goal-detail screen as a
+  `ui://goal-detail-view` HTML resource for one of the caller's own goals.
+- `set_goal_progress` MCP tool — lets the calling coaching AI record a
+  0-100 self-reported progress estimate (and optional rationale) for one of
+  the caller's own goals; never called by the rendered UI itself.
+- `delete_goal` MCP tool — soft-deletes one of the caller's own goals
+  (mirroring the existing REST `DELETE /goals/{id}` behavior) and returns a
+  refreshed home-view resource in the same round trip.
+- `goals.progress_percent` column (nullable integer, 0-100 when set, `NULL`
+  meaning "no estimate yet") added via a versioned Alembic migration.
 - Updates (LFC-003): a goal-linked record of what an AI coach and a user
   agreed on during a coaching conversation, exposed via two MCP
   (Model Context Protocol) tools rather than REST — the first feature with

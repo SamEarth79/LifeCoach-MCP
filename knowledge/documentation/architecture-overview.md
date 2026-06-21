@@ -168,6 +168,64 @@ This is a same-process mount, not a separate service:
   feature's test results — must be addressed before production deployment
   behind a reverse proxy.
 
+### UI-rendering layer: server-rendered HTML over MCP, not just structured tool results
+
+Starting with the home and goal-detail views (LFC-004), some MCP tools
+(`get_home_view`, `get_goal_detail_view`, and `delete_goal`'s success path)
+return rendered HTML content instead of a plain JSON-like tool result —
+this is the first feature where the MCP surface produces actual UI rather
+than data for an LLM to reason over.
+
+```
+            ┌───────────────┐
+  MCP host  │  FastMCP app  │ → app/ui_templates.py renders HTML
+ (renders   │ (app/mcp_     │   from a plain dataclass (HomeViewData /
+  the HTML  │  server.py)   │   GoalDetailViewData), server-side, no
+  in an     └──────┬────────┘   client JS framework
+  iframe/        EmbeddedResource(uri="ui://...", mimeType="text/html")
+  webview) ←───────┘
+```
+
+- **Server-side rendering, no client build step.** `app/ui_templates.py`
+  generates complete standalone HTML documents (inline `<style>` and
+  `<script>`) as plain Python string templates from typed dataclasses
+  (`HomeGoalCard`/`HomeViewData`, `GoalDetailUpdate`/`GoalDetailViewData`).
+  There is no separate frontend framework, bundler, or TypeScript helper
+  SDK — matching `strategy.md`'s "light UI needs" direction. Every
+  user-controlled string (names, titles, descriptions, update content,
+  error messages) is passed through `html.escape` before interpolation;
+  this is the same XSS-escaping discipline already applied at every other
+  user-input boundary in this repo, just applied to a new output context
+  (HTML rendered for an embedded view rather than a JSON API response).
+- **The `EmbeddedResource` wrapping mechanism.** `app/mcp_server.py`'s
+  `_build_embedded_html_resource(uri, html_text)` wraps the rendered HTML
+  in `EmbeddedResource(type="resource", resource=TextResourceContents(uri=...,
+  mimeType="text/html", text=...))` — types imported directly from the
+  installed `mcp` SDK (`mcp.types`), not hand-rolled. This is the standard
+  MCP mechanism for a tool to return renderable content (as opposed to a
+  plain dict/list result) to a host capable of displaying it; confirmed to
+  actually parse/serialize correctly through the installed SDK rather than
+  assumed from documentation alone.
+- **Interaction model: two `postMessage` intents.** The rendered HTML's
+  inline JS sends `window.parent.postMessage(...)` with one of two payload
+  shapes: `{type: "tool", payload: {toolName, params}}` (direct tool
+  invocation — used for goal-card-click navigation and the delete-confirm
+  action) or `{type: "prompt", payload: {prompt}}` (chat-message injection
+  — used for "create a new goal," "just want to talk," and "continue this
+  conversation"). The split matches `strategy.md`: creation/conversation
+  stay conversational, navigation/structured actions are direct tool
+  calls.
+- **Known architectural risk: the `postMessage` tool-invocation shape is
+  unverified against any live MCP-UI host.** No real MCP-UI host was
+  available in any implementation sandbox for this feature. Every direct
+  tool-invocation interaction this feature ships rests on an assumption
+  about the host-side `postMessage` convention that has not been confirmed
+  against the actual MCP-UI spec or a real host. If unsupported, every
+  such interaction must fall back to the chat-message-injection shape
+  instead — a potential rework of this layer's interaction model, not a
+  minor fix. Tracked in
+  `knowledge/documentation/LFC-004-mcp-ui-home-goal-views/technical-doc.md`.
+
 ### Soft delete as an RLS-enforced pattern
 
 The `goals` table (added in LFC-002) is the first user-owned table beyond

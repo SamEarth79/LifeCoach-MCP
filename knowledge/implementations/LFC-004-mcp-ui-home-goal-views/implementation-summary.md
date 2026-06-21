@@ -1,0 +1,418 @@
+# Implementation Summary: LFC-004-mcp-ui-home-goal-views
+
+## LFC-STORY-001: goals.progress_percent migration
+
+**What was implemented:** `migrations/versions/66f94137137d_add_goals_progress_percent.py`
+adds a nullable `progress_percent INTEGER` column to the existing `goals`
+table, with a CHECK constraint
+(`progress_percent IS NULL OR (progress_percent BETWEEN 0 AND 100)`) named
+`goals_progress_percent_check`. `down_revision` points at `8e5660ff9d7f`
+(the `updates` table migration from LFC-003-updates), correctly chaining
+onto the current head. No application code, RLS policy, or test changes
+were made — this is a pure schema-only story laying groundwork for a later
+story to read/write the column.
+
+**What was tested and why:** Per `rules/testing.md`, a hand-written DDL-only
+Alembic migration with no application code has no unit-testable surface, no
+HTTP/MCP feature surface, and no user-facing UI — so unit, feature, and E2E
+layers were all assessed as not applicable, consistent with how
+LFC-002-goals's LFC-STORY-001 and LFC-003-updates's LFC-STORY-001 (the two
+prior migration-only stories in this repo) were tested. Verification
+instead consisted of:
+
+1. Generating the actual SQL Alembic would run via `--sql` dry-run mode for
+   both `upgrade` and `downgrade`, and diffing it against the story's
+   acceptance criteria line by line (column type/nullability, CHECK
+   constraint text, drop order).
+2. Confirming the migration chain (`alembic history --verbose`) is a single
+   linear chain with no branching, and that `down_revision` correctly
+   targets the real current head.
+3. Reading the existing `goals_select_own`/`goals_update_own` RLS policy
+   definitions directly from `2ae062d3817c_create_goals_table.py` to confirm
+   they are row-level predicates with no per-column scoping, so no RLS
+   change is needed for the new column — this is a structural fact about
+   how Postgres RLS works, confirmable by reading the policy SQL without a
+   live database.
+4. Running the full existing test suite to confirm zero regression, since
+   this story touches no application code path any existing test exercises.
+
+No Docker/local Postgres was available in this sandbox, so the migration
+was never executed against a real database — this is recorded explicitly as
+a caveat in `test-results.md` (PASS WITH CAVEATS), not silently assumed
+clean. The CHECK constraint's actual runtime enforcement (rejecting an
+out-of-range value at INSERT/UPDATE time) is the one piece of AC2 that only
+a live database can confirm and remains unverified.
+
+**Test results:** 110/110 full suite passing (unchanged from
+LFC-003-updates's final count — this story added 0 new tests). See
+`test-results.md` for the full breakdown.
+
+## LFC-STORY-002: set_goal_progress MCP tool
+
+**What was implemented:** `app/mcp_server.py::set_goal_progress` and
+`app/schemas.py::GoalProgressUpdate`, added by the backend agent. The tool
+accepts `goal_id` (str, validated as `UUID`), `percentage` (int, validated
+via `Field(ge=0, le=100)`), and an optional `rationale` (str, max 500 chars,
+blank-to-`None`). It follows the same `enforce_mcp_rate_limit(request)` ->
+`verify_bearer_token(...)` ordering as `record_update`/`list_updates`, then
+runs `UPDATE goals SET progress_percent = %s WHERE id = %s RETURNING id`
+through `get_rls_connection(current_user.id)` with no app-level `WHERE
+user_id` clause — ownership is enforced entirely by the existing
+`goals_update_own` RLS policy. A `None` row (RLS exclusion) raises a clean
+`ValueError`. The tool's description explicitly frames this as the AI's own
+internal bookkeeping, never something the rendered UI calls, and the
+successful return value is a plain `{"goal_id": ..., "percentage": ...}`
+dict, not a UI resource. `rationale` is validated but never persisted —
+correctly out of scope per the AC and the LFC-STORY-001 migration, which
+added no corresponding column.
+
+**What was tested and why:** Read `app/mcp_server.py` and `app/schemas.py`
+in full before writing any test, rather than trusting the backend agent's
+report — confirmed the SQL, ordering, validation bounds, no-row-returned
+handling, description text, and return shape all matched the report
+exactly. Per `rules/testing.md`, this story introduces new validation logic,
+rate-limit/auth ordering, and a new MCP tool surface, so both unit and
+feature layers were required; E2E was assessed as not required because the
+story (and AC5) explicitly state the rendered UI never calls this tool —
+there is no user-facing flow to drive through a browser.
+
+- **Unit tests** (`tests/unit/test_mcp_server.py`, appended to the existing
+  file per this module's established one-file convention): validate the
+  happy path, both out-of-range percentage rejections (negative and >100)
+  before any DB call, missing-auth rejection before any DB call, the
+  no-row-returned -> clean `ValueError` path with no commit, absence of an
+  app-level `user_id` predicate in the executed query, rate-limit-before-auth
+  ordering (tracked via a shared `call_order` list populated by both mocks'
+  `side_effect`s), auth-before-DB-call ordering, the literal tool
+  description text (read directly off
+  `mcp_server.mcp._tool_manager._tools["set_goal_progress"].description`,
+  the same technique used for `record_update`'s AC7 in LFC-003-updates), and
+  the plain-dict (non-UI-resource) return shape.
+- **Feature tests** (`tests/feature/test_mcp_set_goal_progress.py`, new
+  file mirroring `test_mcp_record_update.py`'s structure): drive the real
+  MCP streamable-HTTP wire protocol (`initialize` ->
+  `notifications/initialized` -> `tools/call`) against a fresh `FastMCP`
+  instance with the production `set_goal_progress` function and its real
+  registered description, proving the Authorization header and JSON-RPC
+  arguments genuinely reach the tool handler through the live HTTP request
+  the SDK constructs — not just that the code is internally self-consistent.
+  Covers the successful-update path, missing-JWT rejection, expired-JWT
+  rejection, and out-of-range-percentage rejection, all asserting zero DB
+  calls on the rejection paths.
+- AC3 (RLS reliance) is verified only at the app/query level — the absence
+  of a `WHERE user_id` clause and the clean `ValueError` on no-row-returned
+  are both confirmed, but actual enforcement by the `goals_update_own`
+  policy was not exercised against a live Postgres/Supabase instance. This
+  is the same caveat class as every other RLS-dependent story in this repo
+  and is recorded explicitly in `test-results.md` rather than overclaimed.
+
+**Test results:** 14 new tests (10 unit + 4 feature), 124/124 full suite
+passing across two consecutive runs with no flakiness (up from the 110
+baseline carried over from LFC-STORY-001). See `test-results.md` for the
+full breakdown per acceptance criterion.
+
+## LFC-STORY-003: get_home_view tool
+
+**What was implemented:** Backend added `get_home_view` to
+`app/mcp_server.py` plus `HomeGoalCard`/`HomeViewData` dataclasses and a
+`render_home_view` function in a new `app/ui_templates.py`. The tool runs
+`enforce_mcp_rate_limit(request)` then `verify_bearer_token(...)` (same
+ordering as every other tool), queries `users.display_name`/`email` and the
+caller's goals (`id`, `title`, `progress_percent`) with RLS-only filtering —
+no app-level `user_id`/`deleted_at` clause, same pattern as `list_goals` —
+then looks up each goal's most recent `updates.created_at`. Everything is
+wrapped into an `EmbeddedResource(type="resource",
+resource=TextResourceContents(uri="ui://home-view", mimeType="text/html",
+text=render_home_view(data)))`. On a missing user row or any unhandled
+exception during the query, the tool catches the failure and returns the
+same `EmbeddedResource`-wrapped failure-state HTML instead of letting an
+exception propagate. Frontend implemented `render_home_view`'s real
+HTML/CSS/inline JS body: HTML-escapes the greeting name, every goal title,
+and the error message via `html.escape`; renders a circular progress
+indicator with a real percentage or a dashed "no estimate yet" treatment
+when `progress_percent is None` (never a misleading `0%`); shows an
+"Updated <date>" line only when a goal has a recorded update; renders
+distinct "create a new goal" and "just want to talk?" entries wired to
+`lifecoachSendPrompt` (chat-message injection); wires each goal card's click
+to `lifecoachSendTool('get_goal_detail_view', { goal_id: '<id>' })`; and
+includes both an empty-state and a failure-state variant, neither of which
+render any goal cards. Both `postMessage`-calling JS functions carry an
+inline comment marking them `UNVERIFIED against a live MCP-UI host`. No tab
+bar or "Total Days"/"Current Streak" markup was added, per architecture.md's
+explicit exclusions.
+
+**What was tested and why:** Read `app/ui_templates.py` and
+`app/mcp_server.py::get_home_view` in full before writing any test, rather
+than trusting either agent's report at face value. Per `rules/testing.md`,
+this story introduces new rendering logic (`render_home_view`) and a new
+MCP tool surface (`get_home_view`), so unit tests were required for both,
+plus a feature-level wire-protocol test for the tool. E2E was not added in
+this pass: this story's UI is HTML rendered for an MCP-UI host, not a page
+or route of this repo's own, and no live MCP-UI host exists in this sandbox
+to drive a real browser-based `postMessage` round trip against; the
+rendering logic is instead fully covered at the unit layer.
+
+- **Unit tests** (`tests/unit/test_ui_templates.py`, new file — one
+  responsibility per file, since `render_home_view` is a distinct rendering
+  concern from `get_home_view`'s tool logic): an actual constructed
+  `<script>alert(1)</script>` XSS payload in the greeting name, a card
+  title, and the error message, asserting the raw tag is absent and the
+  escaped entity is present in each case; `progress_percent is None` vs a
+  real percentage vs `progress_percent == 0` rendering distinctly (never a
+  misleading `0%` for the `None` case); the "Updated" line's
+  presence/absence tied exactly to `last_updated_at`; empty-state and
+  failure-state both rendering zero goal cards, with failure-state taking
+  precedence even when a non-empty goals list is simultaneously set;
+  absence of any tab-bar/streak/"Total Days" markup; the create-goal/talk
+  entries calling `lifecoachSendPrompt` (never `lifecoachSendTool`); the
+  goal card's `onclick` calling `lifecoachSendTool` with the goal's own id;
+  and confirmation that the `UNVERIFIED against a live MCP-UI host` comment
+  is actually present in both `postMessage`-calling functions' source, not
+  just claimed in the report.
+- **Unit tests** (appended to `tests/unit/test_mcp_server.py`): a new
+  `_SequencedCursor` fake (the existing `_FakeCursor` helpers only support
+  one `fetchall`-or-`fetchone` per test; `get_home_view` issues one
+  `fetchone`, one `fetchall`, then one `fetchone` per goal) drives tests for
+  the successful greeting+cards path, the display-name-to-email fallback,
+  the empty-goals path, absence of `user_id`/`deleted_at` in the executed
+  goal query, the `None`-progress rendering path through the real tool
+  function, rate-limit-before-auth ordering, auth-before-DB-call ordering,
+  and both handled-failure paths (missing user row, and an arbitrary
+  `RuntimeError` raised mid-query) returning a non-raising failure
+  `EmbeddedResource` instead of propagating.
+- **Feature tests** (`tests/feature/test_mcp_get_home_view.py`, new file
+  mirroring `test_mcp_set_goal_progress.py`'s real wire-protocol pattern):
+  drives the actual MCP streamable-HTTP handshake against a fresh `FastMCP`
+  instance with the production `get_home_view` function, confirming a valid
+  JWT yields a non-error response containing the greeting and `text/html`,
+  and that a missing or expired JWT is rejected with zero DB calls.
+- A risk was identified and recorded, not fixed silently: the goal card's
+  `onclick` interpolates `card.id` into a JS-string context inside an HTML
+  attribute. `html.escape`'s default `quote=True` HTML-entity-encodes an
+  embedded single quote, which prevents breaking out of the HTML attribute,
+  but does not fully neutralize a JS-string-context breakout for an
+  arbitrary *untrusted* string in all cases, since the browser HTML-decodes
+  the attribute before the `onclick` body executes. This is not an
+  exploitable defect today — `card.id` is always a server-generated UUID
+  from the `goals.id` column, never user-controlled text, and no other
+  value is interpolated into any `onclick`/script body anywhere in this
+  template — but is flagged explicitly so it is not silently assumed safe
+  if a future change ever interpolates a different, non-UUID value into
+  this same template.
+- AC5 (card-click invoking `get_goal_detail_view` via the MCP-UI host's
+  `postMessage` mechanism) **cannot be tested in this sandbox at all** — no
+  live MCP-UI host exists to observe a real `postMessage` round trip, and
+  `get_goal_detail_view` itself is a separate, not-yet-implemented story.
+  This is recorded as an explicit open verification item, consistent with
+  architecture.md's and requirements.md's own framing of this as an
+  unconfirmed external-contract assumption — not silently treated as
+  passing.
+- AC1/AC4's RLS reliance is verified only at the app/query level (absence of
+  an app-level `user_id`/`deleted_at` clause, and an empty-goals path
+  exercised with a mocked zero-row result) — not against a live
+  Postgres/Supabase instance. Same recurring caveat class as every other
+  RLS-dependent story in this repo.
+
+**Test results:** 31 new tests (18 + 10 unit, 3 feature), 155/155 full
+suite passing across two consecutive runs with no flakiness (up from the
+124 baseline carried over from LFC-STORY-002). See `test-results.md` for
+the full breakdown per acceptance criterion, including the AC4 RLS caveat
+and the AC5 untestable-in-sandbox open item.
+
+## LFC-STORY-004: get_goal_detail_view MCP tool
+
+**What was implemented:** Backend added `get_goal_detail_view` to
+`app/mcp_server.py`. It follows the established `enforce_mcp_rate_limit(request)`
+-> `verify_bearer_token(...)` ordering, then parses `goal_id` as a `UUID`
+before any DB call (raising `ValueError` on a malformed id). It queries the
+goal row (`id, title, description, progress_percent`, RLS-scoped, no
+app-level `user_id` clause) and, only if that row exists, its 5 most recent
+updates (`content, created_at` only — never `transcript`, same query shape
+as `list_updates`). A missing/foreign/soft-deleted goal returns a
+handled-failure `GoalDetailViewData(error="This goal isn't available.")`
+rather than raising, and the same applies to any unhandled exception
+mid-query. The backend also extracted a shared
+`_build_embedded_html_resource(uri, html_text)` helper, refactoring
+`get_home_view`'s existing inline `EmbeddedResource`/`TextResourceContents`
+construction to use it and reusing it for the new
+`_build_goal_detail_view_resource` — a behavior-preserving refactor, not a
+new capability. Frontend implemented `render_goal_detail_view`'s real
+HTML/CSS/inline JS body in `app/ui_templates.py`: reuses the existing
+`_progress_ring` helper unchanged (no second ring implementation); escapes
+`title`/`description`/each update's `content`/`error` via `html.escape`;
+renders an explicit "No updates yet." line when `recent_updates` is empty; a
+"continue this conversation" action whose `onclick` calls
+`lifecoachContinueGoal('{uuid}')` — a function that reads the goal's title
+back from the DOM via `document.getElementById(...).textContent` rather than
+ever interpolating free text into an onclick JS string literal — and a
+two-stage delete confirm (`lifecoachShowDeleteConfirm` ->
+`lifecoachConfirmDelete`) whose confirmed action calls
+`lifecoachSendTool('delete_goal', { goal_id: goalId })` using only the
+trusted UUID.
+
+**What was tested and why:** Read `app/mcp_server.py::get_goal_detail_view`
+and `app/ui_templates.py`'s `GoalDetailUpdate`/`GoalDetailViewData`/
+`render_goal_detail_view` in full before writing any test, rather than
+trusting either agent's report at face value — in particular, the
+"continue conversation" title-handling claim (that the DOM-`textContent`
+approach avoids the JS-string-breakout risk class flagged in LFC-STORY-003's
+test-results) was independently re-verified by reading the code and then by
+constructing an actual hostile title (`Evil" Goal' <script>alert(1)</script>`,
+containing a double-quote, a single-quote, and a raw `<script>` tag) and
+asserting on the real rendered output: the raw `<script>` tag never appears
+anywhere in the document; the title appears only as escaped DOM text content
+inside the `<p id="goal-title-{uuid}">` element; and every single `onclick="..."`
+attribute in the entire document — extracted programmatically, not assumed —
+contains only the trusted UUID and never any fragment of the hostile title.
+This is a genuine behavioral proof, not a restatement of the implementation's
+own assumption.
+
+Per `rules/testing.md`, this story introduces new rendering logic
+(`render_goal_detail_view`) and a new MCP tool surface
+(`get_goal_detail_view`), so unit tests were required for both, plus a
+feature-level wire-protocol test. E2E was not added, same rationale as
+LFC-STORY-003: this is HTML rendered for an MCP-UI host, not a route of this
+repo's own, and no live MCP-UI host exists in this sandbox.
+
+- **Unit tests** (`tests/unit/test_ui_templates.py`, 14 new): title/
+  description/progress/update rendering, transcript never present,
+  empty-updates "No updates yet." treatment, `_progress_ring` reuse for both
+  `None` and `0` progress (distinct treatments), the failure-state rendering
+  no title/progress/updates/actions alongside the error message and taking
+  precedence over simultaneously-set content fields, the continue action
+  calling `lifecoachSendPrompt` (never a tool), the delete action's two-stage
+  confirm gating and its confirmed-only call to
+  `lifecoachSendTool("delete_goal", ...)`, absence of tab-bar/streak markup,
+  and the three-test hostile-input re-verification trio described above.
+- **Unit tests** (`tests/unit/test_mcp_server.py`, 13 new): the happy path
+  through the real tool function; the updates query selecting exactly
+  `content, created_at` with `LIMIT 5`; the empty-updates and
+  `None`-progress paths through the real tool; the missing-goal-row
+  handled-failure path (confirming only one query is ever issued — the
+  updates query never runs once the goal lookup comes back empty); an
+  unhandled-exception handled-failure path; malformed-`goal_id` rejection
+  before any DB call; rate-limit-before-auth and auth-before-DB-call
+  ordering; absence of an app-level `user_id` clause; a tool-description
+  sanity check; and a dedicated regression test
+  (`test_build_embedded_html_resource_helper_used_by_both_home_and_detail_view_builders`)
+  asserting both `_build_home_view_resource` and
+  `_build_goal_detail_view_resource` route through the shared helper, by
+  inspecting their source directly.
+- **Feature tests** (`tests/feature/test_mcp_get_goal_detail_view.py`, 5 new,
+  mirroring `test_mcp_get_home_view.py`'s real wire-protocol pattern): the
+  successful-lookup path through the live MCP transport (confirming
+  `transcript` never appears in the wire-level response body either), the
+  missing-goal failure-resource path, missing-JWT rejection, expired-JWT
+  rejection, and malformed-`goal_id` rejection delivered through the real
+  JSON-RPC `tools/call` arguments.
+- **`get_home_view` regression check**: `tests/feature/test_mcp_get_home_view.py`
+  and the existing `get_home_view`-specific tests in
+  `tests/unit/test_mcp_server.py` were left completely unmodified (verified
+  via `git diff --stat`) and re-run as part of every full-suite run below —
+  all still pass, confirming the `_build_embedded_html_resource` extraction
+  is behavior-preserving for `get_home_view`.
+- AC5's RLS-exclusion path (missing/foreign/soft-deleted goal) is verified
+  only at the app/render level using a mocked zero-row result, not against a
+  live Postgres/Supabase instance — same recurring caveat class as every
+  other RLS-dependent story in this repo.
+
+**Test results:** 32 new tests (14 + 13 unit, 5 feature), 187/187 full suite
+passing across two consecutive runs with no flakiness (up from the 155
+baseline carried over from LFC-STORY-003). See `test-results.md` for the
+full breakdown per acceptance criterion, including the hostile-input
+re-verification detail and the RLS caveat.
+
+## LFC-STORY-005: delete_goal MCP tool
+
+**What was implemented:** Backend added `delete_goal` to
+`app/mcp_server.py`, following the established
+`enforce_mcp_rate_limit(request)` -> `verify_bearer_token(...)` ordering,
+then `UUID(goal_id)` parsing (raising `ValueError` on a malformed id) before
+any DB call. The soft-delete query is
+`UPDATE goals SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL
+RETURNING id`, RLS-scoped via `get_rls_connection(current_user.id)`, with no
+app-level `user_id` clause — byte-for-byte the same as the existing REST
+`DELETE /goals/{id}` handler. A `None` result (no row matched) raises a
+clean `ValueError` with no commit and no home-view refresh attempted. A
+matched row commits, then the tool calls a newly-extracted
+`_fetch_home_view_data(user_id)` helper (pulled out of `get_home_view`'s
+body — now its second real call site, alongside `delete_goal`) followed by
+the existing `_build_home_view_resource` helper, returning the exact same
+`ui://home-view` `EmbeddedResource` shape `get_home_view` itself produces,
+refreshed to reflect the deletion. `get_home_view`'s own body was reduced to
+two lines calling the extracted helper, with its existing try/except
+handled-failure wrapping left intact.
+
+**What was tested and why:** Per this story's explicit instruction (citing
+the LFC-003 PR-review precedent about careless refactor claims and
+LFC-STORY-004's similar-shaped `_build_embedded_html_resource` extraction),
+read `delete_goal`, `get_home_view`, and `_fetch_home_view_data` in full
+directly before writing any test, rather than trusting the backend's report
+at face value. Confirmed independently: the SQL is a genuine `UPDATE`, never
+a `DELETE FROM`; the failure branch (`row is None`) never calls `commit()`
+and never reaches the refresh call; the success branch routes through the
+exact same `_fetch_home_view_data`/`_build_home_view_resource` pair
+`get_home_view` uses, not a parallel ad-hoc implementation; and
+`get_home_view`'s extracted body is otherwise unchanged.
+
+The main regression risk for this story — a careless extraction silently
+changing `get_home_view`'s own behavior — was tested directly: ran
+`tests/unit/test_mcp_server.py`'s `get_home_view`-specific tests and the
+entirety of `tests/feature/test_mcp_get_home_view.py` **completely
+unmodified** (confirmed via `git diff --stat`) before writing any new test.
+All 50 pre-existing tests passed unmodified, confirming the
+`_fetch_home_view_data` extraction is behavior-preserving.
+
+Per `rules/testing.md`, this story adds new business logic (`delete_goal`)
+and a refactor of existing tested logic, so unit tests were required for
+both the new tool and a direct check that the refactor didn't change
+`get_home_view`'s behavior, plus a feature-level wire-protocol test. No
+frontend/UI changes were made in this story (the goal-detail view's
+`onclick` call to `delete_goal` was already built and tested in
+LFC-STORY-004), so E2E was not added.
+
+- **Unit tests** (`tests/unit/test_mcp_server.py`, 11 new): the soft-delete
+  SQL text/params/commit (confirming `UPDATE`, never `DELETE FROM`, and the
+  exact `WHERE`/`SET` clauses), absence of an app-level `user_id` clause,
+  the clean-`ValueError`-with-no-commit-and-no-home-view-built failure path
+  (verified via `AsyncMock(wraps=...)` on the real `_fetch_home_view_data`
+  asserting it was never awaited), rate-limit-before-auth and
+  auth-before-DB-call ordering, malformed-`goal_id` and
+  missing-authorization rejection before any DB call, the success path's
+  refreshed home view excluding the deleted goal's id/title, a same-shape
+  comparison against an actual `get_home_view` call (same URI, same
+  mimetype, same result type), a source-inspection regression guard
+  confirming `delete_goal` references the shared
+  `_fetch_home_view_data`/`_build_home_view_resource` helpers by name, and a
+  tool-description sanity check for the UI-confirm-step-not-proactive
+  framing.
+- **Feature tests** (`tests/feature/test_mcp_delete_goal.py`, 5 new,
+  mirroring `test_mcp_get_home_view.py`'s/`test_mcp_get_goal_detail_view.py`'s
+  real wire-protocol pattern): the successful-delete path through the live
+  MCP transport (re-confirming the `UPDATE`-not-`DELETE` SQL and the
+  excluded-goal assertion at the wire level), missing-JWT rejection,
+  expired-JWT rejection, the clean-failure path for a nonexistent/
+  already-deleted `goal_id`, and malformed-`goal_id` rejection.
+- **`get_home_view` regression check**: `tests/feature/test_mcp_get_home_view.py`
+  and the existing `get_home_view`-specific tests in
+  `tests/unit/test_mcp_server.py` were left completely unmodified (verified
+  via `git diff --stat`) and re-run both standalone and as part of every
+  full-suite run below — all 50 still pass, confirming the
+  `_fetch_home_view_data` extraction is behavior-preserving.
+- AC2's RLS-rejection path (not-owned/already-deleted goal) is verified only
+  at the app/query level using a mocked zero-row result, not against a live
+  Postgres/Supabase instance — same recurring caveat class as every other
+  RLS-dependent story in this repo.
+
+**Test results:** 16 new tests (11 unit, 5 feature), 203/203 full suite
+passing across two consecutive runs with no flakiness (up from the 187
+baseline carried over from LFC-STORY-004). See `test-results.md` for the
+full breakdown per acceptance criterion, including the source-level refactor
+verification and the RLS caveat.
+
+This is the last story in feature LFC-004-mcp-ui-home-goal-views. See
+`test-results.md`'s closing "Feature Summary" section for the full
+cross-story test totals and every recurring caveat carried forward across
+the entire feature, including the prominently-flagged unverified
+MCP-UI-host `postMessage` tool-invocation assumption (LFC-STORY-003 AC5)
+and the `strategy.md` "read-only" documentation gap.

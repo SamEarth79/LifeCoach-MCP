@@ -73,3 +73,17 @@ class UpdateListItem(BaseModel):
     content: str
     source: str
     created_at: str
+
+
+class GoalProgressUpdate(BaseModel):
+    goal_id: UUID
+    percentage: int = Field(ge=0, le=100)
+    rationale: str | None = Field(default=None, max_length=500)
+
+    @field_validator("rationale")
+    @classmethod
+    def reject_blank_rationale(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        return stripped or None
