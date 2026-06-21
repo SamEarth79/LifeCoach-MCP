@@ -1025,3 +1025,158 @@ considered production-ready:**
    feature actually specify, but the project's standing strategic record is
    now stale and should be revisited via `/strategize` before this feature
    (or a similar one) ships further interactive surface.
+
+## Post-merge fix: MCP Apps re-architecture
+
+**Trigger:** item 1 above — "can a UI click in a real MCP-UI host actually
+invoke a tool call via `postMessage`?" — was resolved by actually testing
+against a real Claude Desktop client after this feature merged to `main`.
+The result was worse than "unsupported tool-invocation, fall back to chat
+injection": the original inline-`EmbeddedResource` approach (each tool
+call's response embedding a `text/html` resource directly in the
+`tools/call` result) did not render as an interactive widget at all. Claude
+Desktop simply read the returned HTML as text and summarized it back in the
+chat transcript — the whole MCP-UI surface this feature built (card clicks,
+progress rings, the two-stage delete confirm) was never actually rendering,
+despite every story above being marked "PASS WITH CAVEATS" rather than
+outright failing, because no live host was available during implementation
+to catch this.
+
+Investigation found the actual spec this needed to follow is **MCP Apps /
+SEP-1865** (https://github.com/modelcontextprotocol/ext-apps), which is a
+different mechanism than what was implemented:
+
+- UI templates must be registered as **discoverable MCP resources** via
+  `@mcp.resource(uri=..., mime_type="text/html;profile=mcp-app")` — the host
+  loads the resource once, up front, rather than receiving fresh HTML
+  embedded in every tool response.
+- Each tool that has an associated UI must declare it via
+  `_meta["ui"]["resourceUri"]` on the tool's registration, telling the host
+  which already-loaded resource to render when that tool is called.
+- The tool call itself returns **structured data** (a plain `dict`), not
+  HTML — the already-loaded UI resource renders that data client-side via a
+  JSON-RPC-over-`postMessage` bridge (`ui/initialize` handshake, then
+  `ui/notifications/tool-result` carrying the structured result).
+
+### What changed in this fix
+
+- `app/mcp_server.py`: added `@mcp.resource("ui://home-view", ...)` and
+  `@mcp.resource("ui://goal-detail-view", ...)` resource registrations.
+  `get_home_view`/`get_goal_detail_view`/`delete_goal` now return plain
+  `dict`s (via new `home_view_data_to_dict`/`goal_detail_data_to_dict`
+  helpers) instead of `EmbeddedResource`s. Three lines at the bottom of the
+  file directly mutate `mcp._tool_manager._tools["<name>"].meta = {"ui":
+  {"resourceUri": "..."}}` — a workaround since FastMCP's `@mcp.tool`
+  decorator has no first-class parameter to set `_meta` at registration
+  time.
+- `app/ui_templates.py`: `render_home_view()`/`render_goal_detail_view()`
+  now take no arguments and return a static HTML document containing an
+  inline JS bridge (`_BRIDGE_JS`: implements the `ui/initialize` handshake,
+  exposes `window.callTool`/`window.sendMessage`) and inline rendering JS
+  (`_RENDER_JS`: client-side `escapeHtml`, `renderHomeView`/
+  `renderGoalDetailView`/`goalCard`, building HTML via string concatenation).
+  Rendering moved from server-side Python (`html.escape` + f-strings) to
+  client-side JavaScript executed inside the rendered widget.
+
+### What was verified in this QA pass
+
+- Rewrote `tests/unit/test_ui_templates.py` (39 tests, replacing the 31
+  obsolete tests that asserted the old server-rendered-HTML contract) to test
+  the actual current contract: the static-template/no-argument shape of
+  `render_home_view`/`render_goal_detail_view`, presence of the bridge/render
+  JS functions and the `ui/initialize` handshake, and thorough coverage of
+  `home_view_data_to_dict`/`goal_detail_data_to_dict` (camelCase mapping,
+  `progress_percent is None` preserved as `None` not coerced to `0`,
+  error-state short-circuiting before any other field leaks into the dict,
+  `transcript` never a key in either dict).
+- Cross-checked the client-side `escapeHtml` JS function's replacement set
+  against Python's `html.escape` on an identical payload — confirmed
+  equivalent coverage of all five characters (`&`, `<`, `>`, `"`, `'`) and
+  confirmed `&` is escaped first (avoiding double-escaping the other four
+  entities).
+- Added 9 new tests to `tests/unit/test_mcp_server.py`: confirmed both
+  `@mcp.resource(...)` registrations are reachable via `mcp.list_resources()`
+  with the correct `mime_type`, confirmed the resource functions return
+  exactly `render_home_view()`/`render_goal_detail_view()`'s output, and
+  confirmed the `_meta["ui"]["resourceUri"]` mapping is exactly
+  `get_home_view` → `ui://home-view`, `get_goal_detail_view` →
+  `ui://goal-detail-view`, `delete_goal` → `ui://home-view` (intentional:
+  `delete_goal` returns a refreshed home-view dict on success, so it
+  correctly points at the home-view resource, not the detail-view one) —
+  plus confirmed the three tools with no UI surface
+  (`record_update`/`list_updates`/`set_goal_progress`) carry no `ui` key in
+  `_meta`.
+- `tests/unit/test_mcp_server.py` and all three feature test files
+  (`test_mcp_get_home_view.py`, `test_mcp_get_goal_detail_view.py`,
+  `test_mcp_delete_goal.py`) were already adapted to the new dict-return
+  shape before this QA pass began (confirmed by reading their current state
+  — no `EmbeddedResource`/`mimeType`/`uri`-shape assertions remained stale)
+  and required no further changes.
+- Full suite: **219 passed, 0 failed**, run twice consecutively with
+  identical results — no flakiness, no regressions. (219 = 171 pre-existing
+  + 39 rewritten `test_ui_templates.py` + 9 new `test_mcp_server.py` tests;
+  the 31 obsolete tests were replaced, not merely deleted.)
+
+### Confirmed against a real Claude Desktop client
+
+Unlike every prior "unverified against a live host" caveat recorded
+throughout this feature's stories (LFC-STORY-003 through -005), **this
+re-architecture has been confirmed working as an actual interactive widget
+in real Claude Desktop by the user** — this is stated as a verified fact,
+not a caveat. The `ui/initialize` handshake, the resource-registration +
+`_meta["ui"]["resourceUri"]` linkage, and the client-side rendering of
+`get_home_view`/`get_goal_detail_view`/`delete_goal`'s structured dict
+responses were all observed actually rendering interactively against a live
+host, resolving the single biggest open risk item carried forward across
+this entire feature.
+
+### New defect found during this QA pass — not fixed, reported instead
+
+While re-verifying the onclick-interpolation-discipline property this
+repo's tests have enforced since LFC-STORY-004 (only the server-generated
+UUID `id` may be interpolated into an `onclick` JS-execution context; free
+text like a goal's title must only ever land in escaped DOM text content),
+a **regression was found** in `app/ui_templates.py`'s `_RENDER_JS`,
+`renderGoalDetailView`'s "continue this conversation" button:
+
+```js
+'<button class="continue-entry" type="button" onclick="window.sendMessage(\'Let\'s continue talking about ' + safeTitle + '.\')">Continue this conversation</button>'
+```
+
+`safeTitle` (HTML-escaped via the client-side `escapeHtml`, but otherwise
+the raw, user-controlled goal title) is concatenated directly into a
+single-quoted JS string literal inside the `onclick` attribute value. The
+browser HTML-decodes attribute values before the JS engine parses the
+onclick handler's source — so a title containing characters that
+HTML-decode back to a JS string delimiter (e.g. an apostrophe surviving as
+`&#x27;` then decoding back to `'`) can break out of the string and inject
+arbitrary script. This is exactly the failure mode the prior server-rendered
+template avoided: the old `lifecoachContinueGoal('{GOAL_ID}')` interpolated
+only the trusted UUID into `onclick`, then read the title back from escaped
+DOM `textContent` at click time. This property silently regressed during
+the client-side-JS migration — no other `onclick` in the file has this
+issue (`goalCard`, the delete-confirm two-stage actions, and the create/talk
+entries all interpolate only the UUID or static literal text).
+
+A tripwire test documenting this exact behavior was added
+(`test_render_goal_detail_view_continue_button_onclick_contains_only_uuid_never_hostile_title_text`
+in `tests/unit/test_ui_templates.py`) rather than silently fixed, per this
+agent's instructions not to modify application code on a finding — flagged
+to the orchestrator/user as a FAIL-class finding requiring a decision.
+
+### Resolution
+
+Fixed in `app/ui_templates.py`: the continue-conversation button's `onclick`
+now interpolates only `safeId` (`continueGoal('<uuid>')`), matching every
+other onclick in the file. A new `continueGoal(goalId)` JS function reads the
+title back from the already-escaped `goal-title-<id>` DOM element's
+`textContent` at click time and passes it to `window.sendMessage`, exactly
+mirroring the old server-rendered template's pattern. The tripwire test was
+renamed and flipped to
+`test_render_goal_detail_view_continue_button_interpolates_only_uuid_into_onclick`,
+asserting the fixed behavior (`safeTitle` absent from the onclick line,
+`continueGoal` present, and `continueGoal` itself reads `textContent` and
+calls `window.sendMessage`). Full suite re-run after the fix: **219 passed,
+0 failed**.
+
+**Final verdict: PASS.** No open defects.

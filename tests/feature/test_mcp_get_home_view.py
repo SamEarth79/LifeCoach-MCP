@@ -5,7 +5,7 @@ wire protocol (initialize -> notifications/initialized -> tools/call), the
 same way `test_mcp_set_goal_progress.py` exercises `set_goal_progress` —
 this proves the Authorization header genuinely reaches the tool handler via
 the live HTTP request the MCP SDK constructs from the ASGI scope, and that
-the tool's `EmbeddedResource` response actually serializes over the wire.
+the tool's `dict` response serializes as `TextContent` over the wire.
 """
 
 from contextlib import asynccontextmanager
@@ -190,7 +190,7 @@ async def test_get_home_view_through_live_mcp_transport_returns_html_resource_wi
     body_text = response.text
     assert '"isError":true' not in body_text
     assert "Sam" in body_text
-    assert "text/html" in body_text
+    assert '"type":"text"' in body_text
     assert captured["user_id"] == USER_ID
 
 
