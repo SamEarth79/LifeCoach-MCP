@@ -300,3 +300,187 @@ def test_list_updates_tool_description_promises_no_transcript():
 
     assert "transcript" in description
     assert "never" in description or "not" in description
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_updates_row_with_verified_user_id(monkeypatch):
+    row = (GOAL_ID,)
+    fake_connection, captured = _patch_db(monkeypatch, row)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.set_goal_progress(
+        goal_id=GOAL_ID,
+        percentage=42,
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    assert result == {"goal_id": GOAL_ID, "percentage": 42}
+    assert captured["user_id"] == USER_ID
+    executed_query, executed_params = fake_connection.cursor_instance.executed[0]
+    assert "UPDATE goals" in executed_query
+    assert "SET progress_percent" in executed_query
+    assert executed_params == (42, GOAL_ID)
+    assert fake_connection.committed is True
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_rejects_negative_percentage_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db(monkeypatch, None)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.set_goal_progress(
+            goal_id=GOAL_ID,
+            percentage=-1,
+            ctx=_fake_context("Bearer faketoken"),
+        )
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_rejects_percentage_above_100_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db(monkeypatch, None)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.set_goal_progress(
+            goal_id=GOAL_ID,
+            percentage=101,
+            ctx=_fake_context("Bearer faketoken"),
+        )
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_rejects_missing_authorization_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db(monkeypatch, None)
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.set_goal_progress(
+            goal_id=GOAL_ID,
+            percentage=42,
+            ctx=_fake_context(None),
+        )
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_raises_when_no_row_updated_by_rls(monkeypatch):
+    # No row is returned by the fake cursor, simulating the RLS
+    # `goals_update_own` policy excluding a goal_id that doesn't exist,
+    # isn't owned by the caller, or is soft-deleted. The query itself has
+    # no app-level `WHERE user_id` clause, so this only confirms the app
+    # surfaces a clean ValueError and performs no partial write when no row
+    # comes back — it cannot prove RLS itself rejects the row without a
+    # live Postgres instance (same caveat as every other RLS-dependent
+    # story in this repo, e.g. list_updates's
+    # test_list_updates_scopes_query_through_rls_connection_for_verified_user).
+    fake_connection, _ = _patch_db(monkeypatch, None)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.set_goal_progress(
+            goal_id=GOAL_ID,
+            percentage=42,
+            ctx=_fake_context("Bearer faketoken"),
+        )
+
+    assert fake_connection.committed is False
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_query_has_no_app_level_user_id_clause(monkeypatch):
+    row = (GOAL_ID,)
+    fake_connection, _ = _patch_db(monkeypatch, row)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.set_goal_progress(
+        goal_id=GOAL_ID,
+        percentage=42,
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    executed_query, _ = fake_connection.cursor_instance.executed[0]
+    assert "user_id" not in executed_query.lower()
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_enforces_rate_limit_before_jwt_verification(monkeypatch):
+    fake_connection, _ = _patch_db(monkeypatch, (GOAL_ID,))
+    call_order = []
+
+    async def _record_rate_limit(*_args, **_kwargs):
+        call_order.append("rate_limit")
+
+    async def _record_auth(*_args, **_kwargs):
+        call_order.append("auth")
+        return CurrentUser(id=USER_ID, email="user@example.com")
+
+    rate_limit_mock = AsyncMock(side_effect=_record_rate_limit)
+    auth_mock = AsyncMock(side_effect=_record_auth)
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", rate_limit_mock)
+    monkeypatch.setattr(mcp_server, "verify_bearer_token", auth_mock)
+
+    await mcp_server.set_goal_progress(
+        goal_id=GOAL_ID,
+        percentage=42,
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    assert call_order == ["rate_limit", "auth"]
+    assert fake_connection.cursor_instance.executed != []
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_enforces_jwt_verification_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db(monkeypatch, None)
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.set_goal_progress(
+            goal_id=GOAL_ID,
+            percentage=42,
+            ctx=_fake_context("Bearer faketoken"),
+        )
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+def test_set_goal_progress_tool_description_states_internal_use_not_user_facing():
+    tool = mcp_server.mcp._tool_manager._tools["set_goal_progress"]
+
+    description = tool.description.lower()
+
+    assert "your own" in description or "internal" in description
+    assert "not a user-facing action" in description or "not user-facing" in description
+    assert "ui" in description
+
+
+@pytest.mark.asyncio
+async def test_set_goal_progress_returns_plain_dict_not_ui_resource(monkeypatch):
+    fake_connection, _ = _patch_db(monkeypatch, (GOAL_ID,))
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.set_goal_progress(
+        goal_id=GOAL_ID,
+        percentage=42,
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {"goal_id", "percentage"}
+    assert "type" not in result
+    assert "resource" not in result
+    assert "uri" not in result
