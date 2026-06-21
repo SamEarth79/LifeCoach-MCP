@@ -112,3 +112,80 @@ Caveats carried forward (not fixed in this story, flagged for visibility):
 
 Verdict: **PASS WITH CAVEATS** (same two caveats as the backend agent
 flagged; both independently confirmed, not newly discovered).
+
+## LFC-STORY-003
+
+Read `app/mcp_server.py`'s `list_updates` function and `app/schemas.py`'s
+`UpdateListItem` model in full before writing any tests, to confirm the
+backend agent's report matched the actual code rather than taking it on
+trust: same `verify_bearer_token` → `enforce_mcp_rate_limit` sequence as
+`record_update`; `goal_id` validated as a `UUID` at the boundary; the SQL
+selects only `content, source, created_at` (never names `transcript`) via
+`get_rls_connection(current_user.id)` with no `user_id` or `source`
+filter; `UpdateListItem` declares exactly those three fields with no
+`id`/`goal_id`/`transcript`; an empty result returns `[]`.
+
+What was tested and why:
+
+- **AC1 (never leaks transcript)** — tested at two levels for maximum
+  confidence: a unit test asserts the executed SQL text never contains the
+  word `transcript` (proving the query itself never fetches the column),
+  and both a unit test and a live-wire-protocol feature test assert the
+  returned item has exactly `{content, source, created_at}` as keys. This
+  is the single most important assertion in this story per the story's
+  own framing.
+- **AC2 (no source filtering)** — a mocked row with `source='checkin'`
+  alongside a `coaching_update` row for the same `goal_id` is returned in
+  full by both a unit test and a feature test, confirming no filtering
+  happens in practice (not just absent from the SQL text). As the story
+  itself notes, this is only testable by inserting a `checkin` row
+  directly via the mocked cursor — nothing in this feature can produce
+  one.
+- **AC3 (empty result, not an error)** — a goal with zero rows returns
+  `[]` at both the unit and feature layer.
+- **AC4 (cross-user isolation)** — tested only at the app/query level
+  (confirms no `user_id` predicate exists in the SQL and that
+  `get_rls_connection` is opened scoped to the verified caller's id, so
+  the application correctly relies on the `updates_select_own` RLS policy
+  rather than re-implementing the filter). Not verified against a live
+  Postgres/Supabase instance — the same caveat already on record for every
+  other RLS-dependent story in this feature.
+- **AC5 (auth rejection before any DB call)** — missing, expired, and
+  malformed JWTs are all rejected with zero executed queries, tested at
+  both the unit layer (mocked `verify_bearer_token`) and the feature layer
+  (real JWT signing/verification through the live wire protocol).
+- **AC6 (rate limiting)** — a unit test confirms `enforce_mcp_rate_limit`
+  is awaited once with the verified caller's id, the same wiring
+  `record_update` uses. Consistent with there being no feature-layer
+  429 test for `record_update` either, no new feature-layer rate-limit
+  test was added for `list_updates` — the underlying `enforce_mcp_rate_limit`
+  function (generic across both tools, keyed by IP/user not tool name) is
+  already covered at the feature layer via `tests/feature/test_rate_limit.py`'s
+  REST-endpoint tests and at the unit layer via `tests/unit/test_rate_limit.py`.
+- **Feature-layer wire-protocol test** (`tests/feature/test_mcp_list_updates.py`,
+  new file): drives the real `initialize` → `notifications/initialized` →
+  `tools/call` handshake via `httpx.ASGITransport` against a `FastMCP`
+  instance with the actual production `list_updates` function registered
+  — the same pattern as `test_mcp_record_update.py`, not a weaker
+  function-level mock. Discovered along the way that the streamable-HTTP
+  transport's response body is SSE-framed
+  (`event: message\r\ndata: {...}\r\n\r\n`), requiring a small
+  `_parse_sse_json` test helper to extract the JSON payload — a
+  test-harness detail, not an implementation defect.
+- **Full suite run three times independently**: `110 passed, 0 failed` on
+  every run (96 pre-existing + 14 new: 8 unit in `test_mcp_server.py` + 6
+  feature in the new `test_mcp_list_updates.py`), no flakiness, in the
+  same MCP/rate-limiting area that needed careful re-verification in
+  LFC-STORY-002.
+
+Caveats carried forward (not new, not fixed in this story):
+
+- **AC4** verified only at the app-code level, not against a live
+  Postgres/Supabase instance — same recurring class of caveat as
+  LFC-STORY-001 and LFC-STORY-002.
+- **MCP `allowed_hosts` deployment risk** (flagged in LFC-STORY-002,
+  unresolved) remains unresolved — should be configured before this app
+  is deployed behind a real reverse proxy.
+
+Verdict: **PASS WITH CAVEATS** (no new caveat introduced; both carried
+forward from earlier stories in this feature).

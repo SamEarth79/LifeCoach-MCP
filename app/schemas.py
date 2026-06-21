@@ -67,3 +67,9 @@ class UpdateResponse(BaseModel):
     content: str
     source: str
     created_at: str
+
+
+class UpdateListItem(BaseModel):
+    content: str
+    source: str
+    created_at: str

@@ -277,3 +277,196 @@ app-code level (RLS's empty-row-on-INSERT behavior is correctly handled by
 the application), not against a live Postgres/Supabase instance — carried
 forward as the same class of caveat already on record for this feature's
 LFC-STORY-001.
+
+## LFC-STORY-003
+
+**Verdict: PASS WITH CAVEATS** — same recurring RLS-against-live-DB caveat
+as every other story in this feature; no new caveat introduced.
+
+### Implementation verified against source before writing tests
+
+Read `app/mcp_server.py` and `app/schemas.py` in full. The backend agent's
+report matched the actual code:
+
+- `list_updates(goal_id: str, ctx: Context) -> list[dict]` follows the same
+  `verify_bearer_token` → `enforce_mcp_rate_limit(request, current_user.id)`
+  sequence as `record_update`, both pulled from
+  `ctx.request_context.request`.
+- `goal_id` is validated as a `UUID` at the boundary (`UUID(goal_id)`),
+  raising `ValueError` on failure before any DB call.
+- The SQL is `SELECT content, source, created_at FROM updates WHERE
+  goal_id = %s ORDER BY created_at DESC` via
+  `get_rls_connection(current_user.id)` — no `user_id` filter (relies on
+  the `updates_select_own` RLS policy from LFC-STORY-001's migration), no
+  `source` filter, and critically, `transcript` is never named anywhere in
+  the SELECT — so the column never reaches application memory, not just
+  never reaches the response schema.
+- `UpdateListItem` (`app/schemas.py`) declares exactly `content: str`,
+  `source: str`, `created_at: str` — no `id`, `goal_id`, or `transcript`
+  field exists on the model at all.
+- An empty `fetchall()` result returns `[]` via the list comprehension,
+  not an error path.
+
+### Layers required
+
+- Unit: required (new business logic in `mcp_server.list_updates`, mirrors
+  `record_update`'s unit-test treatment in LFC-STORY-002).
+- Feature: required (new MCP tool call surface, same as `record_update`).
+- E2E (Playwright): not required — `list_updates` is an MCP tool consumed
+  by an AI client, not a browser-driven UI flow, same rationale as
+  LFC-STORY-002.
+
+### Tests written
+
+**Unit — `tests/unit/test_mcp_server.py` (8 new tests, 14 total in file
+after this story):**
+
+- `test_list_updates_returns_only_content_source_created_at_never_transcript`
+  — AC1. The mocked DB row itself contains only `(content, source,
+  created_at)` (no transcript value exists anywhere in the fixture), and
+  the assertion checks `set(result[0].keys()) == {"content", "source",
+  "created_at"}` plus an explicit `"transcript" not in result[0]`. Also
+  asserts the executed SQL text contains `"SELECT content, source,
+  created_at"` and never the word `"transcript"` — proving the query
+  itself never fetches the column, the strongest form of "never leaks"
+  available without a live DB.
+- `test_list_updates_returns_checkin_and_coaching_update_rows_together` —
+  AC2. Mocked rows include one `source='checkin'` row and one
+  `source='coaching_update'` row for the same `goal_id`; asserts both
+  sources come back. Per the story's own framing, this is testable only by
+  inserting a `checkin` row directly via the mocked cursor, since nothing
+  in this feature can produce a `checkin` row itself.
+- `test_list_updates_returns_empty_list_for_goal_with_no_updates` — AC3.
+  Empty `fetchall()` result returns `[]`, not an exception.
+- `test_list_updates_scopes_query_through_rls_connection_for_verified_user`
+  — AC4 (app-level only; see caveat below). Confirms
+  `get_rls_connection` is opened with the verified caller's `current_user.id`
+  and that the executed SQL contains no `user_id` predicate — relying
+  entirely on `updates_select_own` RLS, the same as the backend agent's
+  report.
+- `test_list_updates_rejects_missing_authorization_before_db_call` — AC5.
+  No DB call occurs when `verify_bearer_token` raises.
+- `test_list_updates_rejects_malformed_goal_id_before_db_call` — AC5/AC1
+  boundary validation. A non-UUID `goal_id` raises `ValueError` before any
+  DB call.
+- `test_list_updates_enforces_rate_limit_before_db_call` — AC6.
+  `enforce_mcp_rate_limit` is awaited exactly once with the verified
+  `current_user.id`, mirroring `record_update`'s rate-limit wiring.
+- `test_list_updates_tool_description_promises_no_transcript` — confirms
+  the literal MCP-exposed tool description (read from
+  `mcp._tool_manager._tools["list_updates"].description`, not a comment)
+  promises never returning the transcript.
+
+**Feature — `tests/feature/test_mcp_list_updates.py` (6 new tests, new
+file):**
+
+Drives the real MCP wire protocol (`initialize` →
+`notifications/initialized` → `tools/call`) via `httpx.ASGITransport`
+against a `FastMCP` instance with the actual production `list_updates`
+function registered, the same pattern as
+`tests/feature/test_mcp_record_update.py` — not a weaker, function-level
+mock. One implementation detail discovered while writing these tests: the
+streamable-HTTP transport returns an SSE-framed body
+(`event: message\r\ndata: {...}\r\n\r\n`), so a small `_parse_sse_json`
+helper extracts the `data:` line before parsing JSON — `response.json()`
+alone fails on this transport's response format. This was a test-harness
+detail, not a defect in the implementation.
+
+- `test_list_updates_through_live_mcp_transport_returns_content_source_created_at_only`
+  — AC1 through the real transport. Asserts the literal response text
+  never contains the substring `"transcript"`, and that the
+  `structuredContent.result` items each have exactly the three expected
+  keys.
+- `test_list_updates_through_live_mcp_transport_returns_checkin_and_coaching_update_rows`
+  — AC2 through the real transport.
+- `test_list_updates_through_live_mcp_transport_returns_empty_list_for_goal_with_no_updates`
+  — AC3 through the real transport.
+- `test_list_updates_through_live_mcp_transport_rejects_missing_jwt_before_db_call`
+  — AC5, missing JWT case.
+- `test_list_updates_through_live_mcp_transport_rejects_expired_jwt_before_db_call`
+  — AC5, expired JWT case.
+- `test_list_updates_through_live_mcp_transport_rejects_malformed_jwt_before_db_call`
+  — AC5, malformed JWT case.
+
+AC6 (rate limiting) is covered at the unit layer only
+(`test_list_updates_enforces_rate_limit_before_db_call` plus the
+pre-existing `tests/unit/test_rate_limit.py` coverage of the shared
+`enforce_mcp_rate_limit` function, which both `record_update` and
+`list_updates` call identically). No feature-layer 429 test exists for
+`list_updates`, consistent with there being none for `record_update`
+either in LFC-STORY-002 — the rate-limiting mechanism itself is generic
+(keyed by IP/user, not by tool name) and was already proven once at the
+feature layer's level of confidence via the unit suite; this is not a new
+testing gap introduced by this story.
+
+### Full suite regression check — run three times independently
+
+Run 1: `110 passed, 0 failed` (36 warnings, all pre-existing).
+Run 2: `110 passed, 0 failed`.
+Run 3: `110 passed, 0 failed`.
+
+96 pre-existing (after LFC-STORY-002) + 14 new (8 unit + 6 feature) = 110,
+confirmed by direct collection (`pytest --collect-only`), not just by
+arithmetic. No flakiness across three consecutive runs, in the same
+MCP/rate-limiting area that needed careful re-verification in
+LFC-STORY-002.
+
+### AC4 caveat (same recurring class as every other RLS-dependent story)
+
+Verified only at the app/query level: the SQL correctly omits a `user_id`
+predicate, and the connection is correctly opened scoped to the verified
+caller's id via `get_rls_connection`, so the application is relying on
+`updates_select_own` exactly as designed. Whether that RLS policy actually
+excludes another user's rows for the same `goal_id` under a live
+`auth.uid()` session was **not** verified against a real Postgres/Supabase
+instance in this sandbox — same unresolved limitation carried since
+LFC-STORY-001's migration testing.
+
+### Totals: 14 new automated tests (8 unit + 6 feature), 110/110 full suite
+passing across 3 independent runs, 0 failed, 0 flaky. AC1, AC2, AC3, AC5,
+AC6 fully verified at the app/code level (AC1's "never transcript"
+assertion verified both via the SQL-text check and the live-transport
+response-text check). AC4 verified only at the app-code level, not against
+a live Postgres/Supabase instance — same recurring caveat as every other
+RLS-dependent story in this feature.
+
+## Feature Summary — LFC-003-updates
+
+All 3 stories in this feature (LFC-STORY-001 through LFC-STORY-003) are now
+implemented and tested:
+
+- LFC-STORY-001: `updates` table migration with RLS (PASS WITH CAVEATS)
+- LFC-STORY-002: `record_update` MCP tool + MCP server scaffold (PASS WITH CAVEATS)
+- LFC-STORY-003: `list_updates` MCP tool (PASS WITH CAVEATS)
+
+**Total new automated tests across the feature: 32** (0 + 18 + 14). Final
+full-suite run for the feature: **110 passed, 0 failed**, run three times
+consecutively with identical results — no flakiness, no regressions across
+the whole feature.
+
+**Recurring caveats carried forward — neither resolved by this feature,
+both should be revisited before production:**
+
+1. **RLS policies unverified against a live database.** No Docker daemon
+   and no local `psql` were available in this sandbox for any story in
+   this feature, so `updates_select_own` and `updates_insert_own`'s actual
+   runtime behavior under a real `auth.uid()` session (including
+   `updates_insert_own`'s `EXISTS` subquery against `goals` for
+   active-goal linkage, and `updates_select_own`'s cross-user exclusion
+   exercised by this story's AC4) has never been exercised against a real
+   Postgres/Supabase instance — only via Alembic `--sql` dry-run
+   (LFC-STORY-001) and app-level mocked-cursor tests (LFC-STORY-002,
+   LFC-STORY-003). Before production, re-run against a real
+   Supabase/Postgres instance: seed two users' goals and updates (including
+   a `checkin`-source row) and confirm `list_updates` for user A's goal
+   never returns user B's rows, and that `record_update` is rejected for a
+   `goal_id` not owned by the caller.
+2. **MCP `TransportSecurityMiddleware.allowed_hosts` defaults to `[]` with
+   DNS-rebinding protection on.** Flagged by the backend agent and
+   independently confirmed by `qa` in LFC-STORY-002 by reading
+   `mcp/server/transport_security.py` directly: in a real deployment
+   behind a reverse proxy, this would 421-reject every `/mcp` request
+   (including both `record_update` and `list_updates`) unless
+   `allowed_hosts` is explicitly configured for the deployed hostname. Not
+   a defect in any story's acceptance criteria, but unresolved — should be
+   configured before this app is deployed behind a real reverse proxy.
