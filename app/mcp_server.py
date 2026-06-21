@@ -2,6 +2,7 @@ import logging
 from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import EmbeddedResource, TextResourceContents
 from pydantic import ValidationError
 
 from app.auth import verify_bearer_token
@@ -9,6 +10,7 @@ from app.config import get_settings
 from app.db import get_rls_connection
 from app.rate_limit import enforce_mcp_rate_limit
 from app.schemas import GoalProgressUpdate, UpdateCreate, UpdateListItem
+from app.ui_templates import HomeGoalCard, HomeViewData, render_home_view
 
 logger = logging.getLogger(__name__)
 
@@ -170,3 +172,102 @@ async def set_goal_progress(
         "goal_id": str(progress_update.goal_id),
         "percentage": progress_update.percentage,
     }
+
+
+def _build_home_view_resource(data: HomeViewData) -> EmbeddedResource:
+    return EmbeddedResource(
+        type="resource",
+        resource=TextResourceContents(
+            uri="ui://home-view",
+            mimeType="text/html",
+            text=render_home_view(data),
+        ),
+    )
+
+
+@mcp.tool(
+    description=(
+        "Return the home screen UI for the signed-in user: a greeting, a "
+        "card per active goal with its progress, and distinct entries to "
+        "start a new goal or just talk. Call this to show the user their "
+        "home screen, not as a source of goal data for your own reasoning "
+        "— use list_updates/other tools for that."
+    )
+)
+async def get_home_view(ctx: Context) -> EmbeddedResource:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        async with get_rls_connection(current_user.id) as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT display_name, email
+                    FROM users
+                    WHERE id = %s
+                    """,
+                    (current_user.id,),
+                )
+                user_row = await cursor.fetchone()
+
+                if user_row is None:
+                    logger.warning("get_home_view: no user row for caller %s", current_user.id)
+                    return _build_home_view_resource(
+                        HomeViewData(
+                            greeting_name=None,
+                            goals=[],
+                            error="We couldn't load your home screen right now.",
+                        )
+                    )
+
+                display_name, email = user_row
+
+                await cursor.execute(
+                    """
+                    SELECT id, title, progress_percent
+                    FROM goals
+                    ORDER BY created_at DESC
+                    """
+                )
+                goal_rows = await cursor.fetchall()
+
+                goals: list[HomeGoalCard] = []
+                for goal_id, title, progress_percent in goal_rows:
+                    await cursor.execute(
+                        """
+                        SELECT created_at
+                        FROM updates
+                        WHERE goal_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (str(goal_id),),
+                    )
+                    update_row = await cursor.fetchone()
+                    last_updated_at = update_row[0].isoformat() if update_row is not None else None
+
+                    goals.append(
+                        HomeGoalCard(
+                            id=str(goal_id),
+                            title=title,
+                            progress_percent=progress_percent,
+                            last_updated_at=last_updated_at,
+                        )
+                    )
+    except Exception:
+        logger.exception("get_home_view failed for caller %s", current_user.id)
+        return _build_home_view_resource(
+            HomeViewData(
+                greeting_name=None,
+                goals=[],
+                error="We couldn't load your home screen right now.",
+            )
+        )
+
+    return _build_home_view_resource(
+        HomeViewData(greeting_name=display_name or email, goals=goals)
+    )

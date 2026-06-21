@@ -110,3 +110,111 @@ there is no user-facing flow to drive through a browser.
 passing across two consecutive runs with no flakiness (up from the 110
 baseline carried over from LFC-STORY-001). See `test-results.md` for the
 full breakdown per acceptance criterion.
+
+## LFC-STORY-003: get_home_view tool
+
+**What was implemented:** Backend added `get_home_view` to
+`app/mcp_server.py` plus `HomeGoalCard`/`HomeViewData` dataclasses and a
+`render_home_view` function in a new `app/ui_templates.py`. The tool runs
+`enforce_mcp_rate_limit(request)` then `verify_bearer_token(...)` (same
+ordering as every other tool), queries `users.display_name`/`email` and the
+caller's goals (`id`, `title`, `progress_percent`) with RLS-only filtering —
+no app-level `user_id`/`deleted_at` clause, same pattern as `list_goals` —
+then looks up each goal's most recent `updates.created_at`. Everything is
+wrapped into an `EmbeddedResource(type="resource",
+resource=TextResourceContents(uri="ui://home-view", mimeType="text/html",
+text=render_home_view(data)))`. On a missing user row or any unhandled
+exception during the query, the tool catches the failure and returns the
+same `EmbeddedResource`-wrapped failure-state HTML instead of letting an
+exception propagate. Frontend implemented `render_home_view`'s real
+HTML/CSS/inline JS body: HTML-escapes the greeting name, every goal title,
+and the error message via `html.escape`; renders a circular progress
+indicator with a real percentage or a dashed "no estimate yet" treatment
+when `progress_percent is None` (never a misleading `0%`); shows an
+"Updated <date>" line only when a goal has a recorded update; renders
+distinct "create a new goal" and "just want to talk?" entries wired to
+`lifecoachSendPrompt` (chat-message injection); wires each goal card's click
+to `lifecoachSendTool('get_goal_detail_view', { goal_id: '<id>' })`; and
+includes both an empty-state and a failure-state variant, neither of which
+render any goal cards. Both `postMessage`-calling JS functions carry an
+inline comment marking them `UNVERIFIED against a live MCP-UI host`. No tab
+bar or "Total Days"/"Current Streak" markup was added, per architecture.md's
+explicit exclusions.
+
+**What was tested and why:** Read `app/ui_templates.py` and
+`app/mcp_server.py::get_home_view` in full before writing any test, rather
+than trusting either agent's report at face value. Per `rules/testing.md`,
+this story introduces new rendering logic (`render_home_view`) and a new
+MCP tool surface (`get_home_view`), so unit tests were required for both,
+plus a feature-level wire-protocol test for the tool. E2E was not added in
+this pass: this story's UI is HTML rendered for an MCP-UI host, not a page
+or route of this repo's own, and no live MCP-UI host exists in this sandbox
+to drive a real browser-based `postMessage` round trip against; the
+rendering logic is instead fully covered at the unit layer.
+
+- **Unit tests** (`tests/unit/test_ui_templates.py`, new file — one
+  responsibility per file, since `render_home_view` is a distinct rendering
+  concern from `get_home_view`'s tool logic): an actual constructed
+  `<script>alert(1)</script>` XSS payload in the greeting name, a card
+  title, and the error message, asserting the raw tag is absent and the
+  escaped entity is present in each case; `progress_percent is None` vs a
+  real percentage vs `progress_percent == 0` rendering distinctly (never a
+  misleading `0%` for the `None` case); the "Updated" line's
+  presence/absence tied exactly to `last_updated_at`; empty-state and
+  failure-state both rendering zero goal cards, with failure-state taking
+  precedence even when a non-empty goals list is simultaneously set;
+  absence of any tab-bar/streak/"Total Days" markup; the create-goal/talk
+  entries calling `lifecoachSendPrompt` (never `lifecoachSendTool`); the
+  goal card's `onclick` calling `lifecoachSendTool` with the goal's own id;
+  and confirmation that the `UNVERIFIED against a live MCP-UI host` comment
+  is actually present in both `postMessage`-calling functions' source, not
+  just claimed in the report.
+- **Unit tests** (appended to `tests/unit/test_mcp_server.py`): a new
+  `_SequencedCursor` fake (the existing `_FakeCursor` helpers only support
+  one `fetchall`-or-`fetchone` per test; `get_home_view` issues one
+  `fetchone`, one `fetchall`, then one `fetchone` per goal) drives tests for
+  the successful greeting+cards path, the display-name-to-email fallback,
+  the empty-goals path, absence of `user_id`/`deleted_at` in the executed
+  goal query, the `None`-progress rendering path through the real tool
+  function, rate-limit-before-auth ordering, auth-before-DB-call ordering,
+  and both handled-failure paths (missing user row, and an arbitrary
+  `RuntimeError` raised mid-query) returning a non-raising failure
+  `EmbeddedResource` instead of propagating.
+- **Feature tests** (`tests/feature/test_mcp_get_home_view.py`, new file
+  mirroring `test_mcp_set_goal_progress.py`'s real wire-protocol pattern):
+  drives the actual MCP streamable-HTTP handshake against a fresh `FastMCP`
+  instance with the production `get_home_view` function, confirming a valid
+  JWT yields a non-error response containing the greeting and `text/html`,
+  and that a missing or expired JWT is rejected with zero DB calls.
+- A risk was identified and recorded, not fixed silently: the goal card's
+  `onclick` interpolates `card.id` into a JS-string context inside an HTML
+  attribute. `html.escape`'s default `quote=True` HTML-entity-encodes an
+  embedded single quote, which prevents breaking out of the HTML attribute,
+  but does not fully neutralize a JS-string-context breakout for an
+  arbitrary *untrusted* string in all cases, since the browser HTML-decodes
+  the attribute before the `onclick` body executes. This is not an
+  exploitable defect today — `card.id` is always a server-generated UUID
+  from the `goals.id` column, never user-controlled text, and no other
+  value is interpolated into any `onclick`/script body anywhere in this
+  template — but is flagged explicitly so it is not silently assumed safe
+  if a future change ever interpolates a different, non-UUID value into
+  this same template.
+- AC5 (card-click invoking `get_goal_detail_view` via the MCP-UI host's
+  `postMessage` mechanism) **cannot be tested in this sandbox at all** — no
+  live MCP-UI host exists to observe a real `postMessage` round trip, and
+  `get_goal_detail_view` itself is a separate, not-yet-implemented story.
+  This is recorded as an explicit open verification item, consistent with
+  architecture.md's and requirements.md's own framing of this as an
+  unconfirmed external-contract assumption — not silently treated as
+  passing.
+- AC1/AC4's RLS reliance is verified only at the app/query level (absence of
+  an app-level `user_id`/`deleted_at` clause, and an empty-goals path
+  exercised with a mocked zero-row result) — not against a live
+  Postgres/Supabase instance. Same recurring caveat class as every other
+  RLS-dependent story in this repo.
+
+**Test results:** 31 new tests (18 + 10 unit, 3 feature), 155/155 full
+suite passing across two consecutive runs with no flakiness (up from the
+124 baseline carried over from LFC-STORY-002). See `test-results.md` for
+the full breakdown per acceptance criterion, including the AC4 RLS caveat
+and the AC5 untestable-in-sandbox open item.

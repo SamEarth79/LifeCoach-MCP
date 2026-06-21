@@ -7,6 +7,7 @@ import pytest
 
 from app import mcp_server
 from app.auth import CurrentUser
+from mcp.types import EmbeddedResource
 
 USER_ID = "11111111-1111-1111-1111-111111111111"
 GOAL_ID = "33333333-3333-3333-3333-333333333333"
@@ -484,3 +485,224 @@ async def test_set_goal_progress_returns_plain_dict_not_ui_resource(monkeypatch)
     assert "type" not in result
     assert "resource" not in result
     assert "uri" not in result
+
+
+class _SequencedCursor:
+    """Fake cursor for `get_home_view`'s interleaved query pattern: one
+    `fetchone` for the user row, one `fetchall` for the goal rows, then one
+    `fetchone` per goal for its most recent update. Each entry in
+    `responses` is consumed in order regardless of whether the caller calls
+    `fetchone` or `fetchall` — the test supplies responses in the exact
+    order the production code is expected to issue queries.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.executed = []
+
+    async def execute(self, query, params=None):
+        self.executed.append((query, params))
+
+    async def fetchone(self):
+        return self._responses.pop(0)
+
+    async def fetchall(self):
+        return self._responses.pop(0)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+
+class _SequencedConnection:
+    def __init__(self, responses):
+        self.cursor_instance = _SequencedCursor(responses)
+        self.committed = False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    async def commit(self):
+        self.committed = True
+
+
+def _patch_db_sequenced(monkeypatch, responses):
+    fake_connection = _SequencedConnection(responses)
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_get_rls_connection(user_id):
+        captured["user_id"] = user_id
+        yield fake_connection
+
+    monkeypatch.setattr(mcp_server, "get_rls_connection", fake_get_rls_connection)
+    return fake_connection, captured
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_returns_embedded_resource_with_greeting_and_goal_cards(monkeypatch):
+    user_row = ("Sam", "sam@example.com")
+    goal_rows = [(GOAL_ID, "Run a 5k", 42)]
+    update_row = (CREATED_AT,)
+    fake_connection, captured = _patch_db_sequenced(
+        monkeypatch, [user_row, goal_rows, update_row]
+    )
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert result.resource.uri.scheme == "ui"
+    assert result.resource.mimeType == "text/html"
+    assert "Sam" in result.resource.text
+    assert "Run a 5k" in result.resource.text
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_falls_back_to_email_when_no_display_name(monkeypatch):
+    user_row = (None, "sam@example.com")
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [user_row, []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert "sam@example.com" in result.resource.text
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_returns_empty_state_for_zero_active_goals(monkeypatch):
+    user_row = ("Sam", "sam@example.com")
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [user_row, []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert 'class="card"' not in result.resource.text
+    assert "Create a new goal" in result.resource.text
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_goal_query_has_no_app_level_user_id_or_deleted_at_clause(monkeypatch):
+    user_row = ("Sam", "sam@example.com")
+    goal_rows = [(GOAL_ID, "Run a 5k", None)]
+    update_row = None
+    fake_connection, captured = _patch_db_sequenced(
+        monkeypatch, [user_row, goal_rows, update_row]
+    )
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    goal_query, goal_params = fake_connection.cursor_instance.executed[1]
+    assert "user_id" not in goal_query.lower()
+    assert "deleted_at" not in goal_query.lower()
+    assert goal_params is None
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_renders_no_estimate_yet_when_progress_percent_is_null(monkeypatch):
+    user_row = ("Sam", "sam@example.com")
+    goal_rows = [(GOAL_ID, "Run a 5k", None)]
+    update_row = None
+    _patch_db_sequenced(monkeypatch, [user_row, goal_rows, update_row])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    body = result.resource.text.split("<body>")[1]
+    assert "no-estimate" in body
+    assert "0%" not in body
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_enforces_rate_limit_before_jwt_verification(monkeypatch):
+    user_row = ("Sam", "sam@example.com")
+    _patch_db_sequenced(monkeypatch, [user_row, []])
+    call_order = []
+
+    async def _record_rate_limit(*_args, **_kwargs):
+        call_order.append("rate_limit")
+
+    async def _record_auth(*_args, **_kwargs):
+        call_order.append("auth")
+        return CurrentUser(id=USER_ID, email="user@example.com")
+
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", AsyncMock(side_effect=_record_rate_limit))
+    monkeypatch.setattr(mcp_server, "verify_bearer_token", AsyncMock(side_effect=_record_auth))
+
+    await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert call_order == ["rate_limit", "auth"]
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_enforces_jwt_verification_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.get_home_view(ctx=_fake_context(None))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_returns_failure_resource_when_user_row_missing(monkeypatch):
+    _patch_db_sequenced(monkeypatch, [None])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert 'class="card"' not in result.resource.text
+    assert "couldn" in result.resource.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_get_home_view_returns_failure_resource_on_unhandled_db_error_instead_of_raising(monkeypatch):
+    class _BoomCursor:
+        async def execute(self, *_args, **_kwargs):
+            raise RuntimeError("db exploded")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc_info):
+            return False
+
+    class _BoomConnection:
+        def cursor(self):
+            return _BoomCursor()
+
+    @asynccontextmanager
+    async def fake_get_rls_connection(_user_id):
+        yield _BoomConnection()
+
+    monkeypatch.setattr(mcp_server, "get_rls_connection", fake_get_rls_connection)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert 'class="card"' not in result.resource.text
+    assert "couldn" in result.resource.text.lower()
+
+
+def test_get_home_view_tool_description_mentions_home_screen():
+    tool = mcp_server.mcp._tool_manager._tools["get_home_view"]
+
+    description = tool.description.lower()
+
+    assert "home" in description
