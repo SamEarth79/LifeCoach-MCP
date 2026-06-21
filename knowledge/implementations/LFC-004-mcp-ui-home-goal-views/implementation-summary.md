@@ -321,3 +321,98 @@ passing across two consecutive runs with no flakiness (up from the 155
 baseline carried over from LFC-STORY-003). See `test-results.md` for the
 full breakdown per acceptance criterion, including the hostile-input
 re-verification detail and the RLS caveat.
+
+## LFC-STORY-005: delete_goal MCP tool
+
+**What was implemented:** Backend added `delete_goal` to
+`app/mcp_server.py`, following the established
+`enforce_mcp_rate_limit(request)` -> `verify_bearer_token(...)` ordering,
+then `UUID(goal_id)` parsing (raising `ValueError` on a malformed id) before
+any DB call. The soft-delete query is
+`UPDATE goals SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL
+RETURNING id`, RLS-scoped via `get_rls_connection(current_user.id)`, with no
+app-level `user_id` clause — byte-for-byte the same as the existing REST
+`DELETE /goals/{id}` handler. A `None` result (no row matched) raises a
+clean `ValueError` with no commit and no home-view refresh attempted. A
+matched row commits, then the tool calls a newly-extracted
+`_fetch_home_view_data(user_id)` helper (pulled out of `get_home_view`'s
+body — now its second real call site, alongside `delete_goal`) followed by
+the existing `_build_home_view_resource` helper, returning the exact same
+`ui://home-view` `EmbeddedResource` shape `get_home_view` itself produces,
+refreshed to reflect the deletion. `get_home_view`'s own body was reduced to
+two lines calling the extracted helper, with its existing try/except
+handled-failure wrapping left intact.
+
+**What was tested and why:** Per this story's explicit instruction (citing
+the LFC-003 PR-review precedent about careless refactor claims and
+LFC-STORY-004's similar-shaped `_build_embedded_html_resource` extraction),
+read `delete_goal`, `get_home_view`, and `_fetch_home_view_data` in full
+directly before writing any test, rather than trusting the backend's report
+at face value. Confirmed independently: the SQL is a genuine `UPDATE`, never
+a `DELETE FROM`; the failure branch (`row is None`) never calls `commit()`
+and never reaches the refresh call; the success branch routes through the
+exact same `_fetch_home_view_data`/`_build_home_view_resource` pair
+`get_home_view` uses, not a parallel ad-hoc implementation; and
+`get_home_view`'s extracted body is otherwise unchanged.
+
+The main regression risk for this story — a careless extraction silently
+changing `get_home_view`'s own behavior — was tested directly: ran
+`tests/unit/test_mcp_server.py`'s `get_home_view`-specific tests and the
+entirety of `tests/feature/test_mcp_get_home_view.py` **completely
+unmodified** (confirmed via `git diff --stat`) before writing any new test.
+All 50 pre-existing tests passed unmodified, confirming the
+`_fetch_home_view_data` extraction is behavior-preserving.
+
+Per `rules/testing.md`, this story adds new business logic (`delete_goal`)
+and a refactor of existing tested logic, so unit tests were required for
+both the new tool and a direct check that the refactor didn't change
+`get_home_view`'s behavior, plus a feature-level wire-protocol test. No
+frontend/UI changes were made in this story (the goal-detail view's
+`onclick` call to `delete_goal` was already built and tested in
+LFC-STORY-004), so E2E was not added.
+
+- **Unit tests** (`tests/unit/test_mcp_server.py`, 11 new): the soft-delete
+  SQL text/params/commit (confirming `UPDATE`, never `DELETE FROM`, and the
+  exact `WHERE`/`SET` clauses), absence of an app-level `user_id` clause,
+  the clean-`ValueError`-with-no-commit-and-no-home-view-built failure path
+  (verified via `AsyncMock(wraps=...)` on the real `_fetch_home_view_data`
+  asserting it was never awaited), rate-limit-before-auth and
+  auth-before-DB-call ordering, malformed-`goal_id` and
+  missing-authorization rejection before any DB call, the success path's
+  refreshed home view excluding the deleted goal's id/title, a same-shape
+  comparison against an actual `get_home_view` call (same URI, same
+  mimetype, same result type), a source-inspection regression guard
+  confirming `delete_goal` references the shared
+  `_fetch_home_view_data`/`_build_home_view_resource` helpers by name, and a
+  tool-description sanity check for the UI-confirm-step-not-proactive
+  framing.
+- **Feature tests** (`tests/feature/test_mcp_delete_goal.py`, 5 new,
+  mirroring `test_mcp_get_home_view.py`'s/`test_mcp_get_goal_detail_view.py`'s
+  real wire-protocol pattern): the successful-delete path through the live
+  MCP transport (re-confirming the `UPDATE`-not-`DELETE` SQL and the
+  excluded-goal assertion at the wire level), missing-JWT rejection,
+  expired-JWT rejection, the clean-failure path for a nonexistent/
+  already-deleted `goal_id`, and malformed-`goal_id` rejection.
+- **`get_home_view` regression check**: `tests/feature/test_mcp_get_home_view.py`
+  and the existing `get_home_view`-specific tests in
+  `tests/unit/test_mcp_server.py` were left completely unmodified (verified
+  via `git diff --stat`) and re-run both standalone and as part of every
+  full-suite run below — all 50 still pass, confirming the
+  `_fetch_home_view_data` extraction is behavior-preserving.
+- AC2's RLS-rejection path (not-owned/already-deleted goal) is verified only
+  at the app/query level using a mocked zero-row result, not against a live
+  Postgres/Supabase instance — same recurring caveat class as every other
+  RLS-dependent story in this repo.
+
+**Test results:** 16 new tests (11 unit, 5 feature), 203/203 full suite
+passing across two consecutive runs with no flakiness (up from the 187
+baseline carried over from LFC-STORY-004). See `test-results.md` for the
+full breakdown per acceptance criterion, including the source-level refactor
+verification and the RLS caveat.
+
+This is the last story in feature LFC-004-mcp-ui-home-goal-views. See
+`test-results.md`'s closing "Feature Summary" section for the full
+cross-story test totals and every recurring caveat carried forward across
+the entire feature, including the prominently-flagged unverified
+MCP-UI-host `postMessage` tool-invocation assumption (LFC-STORY-003 AC5)
+and the `strategy.md` "read-only" documentation gap.

@@ -202,6 +202,65 @@ def _build_goal_detail_view_resource(data: GoalDetailViewData) -> EmbeddedResour
     )
 
 
+async def _fetch_home_view_data(user_id: str) -> HomeViewData:
+    async with get_rls_connection(user_id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT display_name, email
+                FROM users
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+            user_row = await cursor.fetchone()
+
+            if user_row is None:
+                logger.warning("_fetch_home_view_data: no user row for caller %s", user_id)
+                return HomeViewData(
+                    greeting_name=None,
+                    goals=[],
+                    error="We couldn't load your home screen right now.",
+                )
+
+            display_name, email = user_row
+
+            await cursor.execute(
+                """
+                SELECT id, title, progress_percent
+                FROM goals
+                ORDER BY created_at DESC
+                """
+            )
+            goal_rows = await cursor.fetchall()
+
+            goals: list[HomeGoalCard] = []
+            for goal_id, title, progress_percent in goal_rows:
+                await cursor.execute(
+                    """
+                    SELECT created_at
+                    FROM updates
+                    WHERE goal_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (str(goal_id),),
+                )
+                update_row = await cursor.fetchone()
+                last_updated_at = update_row[0].isoformat() if update_row is not None else None
+
+                goals.append(
+                    HomeGoalCard(
+                        id=str(goal_id),
+                        title=title,
+                        progress_percent=progress_percent,
+                        last_updated_at=last_updated_at,
+                    )
+                )
+
+    return HomeViewData(greeting_name=display_name or email, goals=goals)
+
+
 @mcp.tool(
     description=(
         "Return the home screen UI for the signed-in user: a greeting, a "
@@ -219,62 +278,7 @@ async def get_home_view(ctx: Context) -> EmbeddedResource:
     current_user = await verify_bearer_token(authorization_header)
 
     try:
-        async with get_rls_connection(current_user.id) as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(
-                    """
-                    SELECT display_name, email
-                    FROM users
-                    WHERE id = %s
-                    """,
-                    (current_user.id,),
-                )
-                user_row = await cursor.fetchone()
-
-                if user_row is None:
-                    logger.warning("get_home_view: no user row for caller %s", current_user.id)
-                    return _build_home_view_resource(
-                        HomeViewData(
-                            greeting_name=None,
-                            goals=[],
-                            error="We couldn't load your home screen right now.",
-                        )
-                    )
-
-                display_name, email = user_row
-
-                await cursor.execute(
-                    """
-                    SELECT id, title, progress_percent
-                    FROM goals
-                    ORDER BY created_at DESC
-                    """
-                )
-                goal_rows = await cursor.fetchall()
-
-                goals: list[HomeGoalCard] = []
-                for goal_id, title, progress_percent in goal_rows:
-                    await cursor.execute(
-                        """
-                        SELECT created_at
-                        FROM updates
-                        WHERE goal_id = %s
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                        """,
-                        (str(goal_id),),
-                    )
-                    update_row = await cursor.fetchone()
-                    last_updated_at = update_row[0].isoformat() if update_row is not None else None
-
-                    goals.append(
-                        HomeGoalCard(
-                            id=str(goal_id),
-                            title=title,
-                            progress_percent=progress_percent,
-                            last_updated_at=last_updated_at,
-                        )
-                    )
+        home_view_data = await _fetch_home_view_data(current_user.id)
     except Exception:
         logger.exception("get_home_view failed for caller %s", current_user.id)
         return _build_home_view_resource(
@@ -285,9 +289,7 @@ async def get_home_view(ctx: Context) -> EmbeddedResource:
             )
         )
 
-    return _build_home_view_resource(
-        HomeViewData(greeting_name=display_name or email, goals=goals)
-    )
+    return _build_home_view_resource(home_view_data)
 
 
 @mcp.tool(
@@ -378,3 +380,60 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
             recent_updates=recent_updates,
         )
     )
+
+
+@mcp.tool(
+    description=(
+        "Soft-delete one of the user's own goals. This is intended to be "
+        "called from the goal-detail view's confirm-delete UI action after "
+        "the user has explicitly confirmed, not something you should "
+        "invoke proactively mid-conversation. On success, returns a "
+        "refreshed home screen UI resource reflecting the deletion."
+    )
+)
+async def delete_goal(goal_id: str, ctx: Context) -> EmbeddedResource:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        validated_goal_id = UUID(goal_id)
+    except ValueError as exc:
+        logger.warning("delete_goal validation failed: %s", exc)
+        raise ValueError("goal_id must be a valid UUID") from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE goals
+                SET deleted_at = now()
+                WHERE id = %s AND deleted_at IS NULL
+                RETURNING id
+                """,
+                (str(validated_goal_id),),
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                await conn.commit()
+
+    if row is None:
+        raise ValueError(
+            "goal_id does not exist, is not owned by the caller, or is already deleted"
+        )
+
+    try:
+        home_view_data = await _fetch_home_view_data(current_user.id)
+    except Exception:
+        logger.exception("delete_goal: refreshing home view failed for caller %s", current_user.id)
+        return _build_home_view_resource(
+            HomeViewData(
+                greeting_name=None,
+                goals=[],
+                error="We couldn't load your home screen right now.",
+            )
+        )
+
+    return _build_home_view_resource(home_view_data)

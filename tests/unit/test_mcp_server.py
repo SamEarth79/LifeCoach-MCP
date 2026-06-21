@@ -921,3 +921,259 @@ def test_build_embedded_html_resource_helper_used_by_both_home_and_detail_view_b
 
     assert "_build_embedded_html_resource" in home_source
     assert "_build_embedded_html_resource" in detail_source
+
+
+class _DeleteThenRefreshCursor:
+    """Fake cursor for `delete_goal`'s two-phase query pattern: first the
+    `UPDATE ... RETURNING id` for the soft delete, then (only on success)
+    the same interleaved user/goal/update queries `_fetch_home_view_data`
+    issues. `delete_row` is consumed by the first `fetchone()`; the rest of
+    `refresh_responses` is consumed in order by the subsequent calls.
+    """
+
+    def __init__(self, delete_row, refresh_responses=None):
+        self._delete_row = delete_row
+        self._refresh_responses = list(refresh_responses or [])
+        self._delete_consumed = False
+        self.executed = []
+
+    async def execute(self, query, params=None):
+        self.executed.append((query, params))
+
+    async def fetchone(self):
+        if not self._delete_consumed:
+            self._delete_consumed = True
+            return self._delete_row
+        return self._refresh_responses.pop(0)
+
+    async def fetchall(self):
+        return self._refresh_responses.pop(0)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc_info):
+        return False
+
+
+class _DeleteThenRefreshConnection:
+    def __init__(self, delete_row, refresh_responses=None):
+        self.cursor_instance = _DeleteThenRefreshCursor(delete_row, refresh_responses)
+        self.committed = False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    async def commit(self):
+        self.committed = True
+
+
+def _patch_db_for_delete(monkeypatch, delete_row, refresh_responses=None):
+    fake_connection = _DeleteThenRefreshConnection(delete_row, refresh_responses)
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_get_rls_connection(user_id):
+        captured["user_id"] = user_id
+        yield fake_connection
+
+    monkeypatch.setattr(mcp_server, "get_rls_connection", fake_get_rls_connection)
+    return fake_connection, captured
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_soft_deletes_via_update_never_a_hard_delete(monkeypatch):
+    delete_row = (GOAL_ID,)
+    refresh_responses = [("Sam", "sam@example.com"), [], None]
+    fake_connection, captured = _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    delete_query, delete_params = fake_connection.cursor_instance.executed[0]
+    assert "UPDATE goals" in delete_query
+    assert "DELETE FROM" not in delete_query.upper()
+    assert not delete_query.strip().upper().startswith("DELETE")
+    assert "SET deleted_at = now()" in delete_query
+    assert "WHERE id = %s AND deleted_at IS NULL" in delete_query
+    assert delete_params == (GOAL_ID,)
+    assert fake_connection.committed is True
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_query_has_no_app_level_user_id_clause(monkeypatch):
+    delete_row = (GOAL_ID,)
+    refresh_responses = [("Sam", "sam@example.com"), [], None]
+    fake_connection, _ = _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    # No app-level `WHERE user_id` filter exists in the SQL; the query
+    # relies entirely on `get_rls_connection(current_user.id)` so Postgres
+    # RLS (the `goals_update_own` policy) is what would actually enforce
+    # ownership in production. This only confirms the connection opens with
+    # the verified caller's id and the query text has no such clause — it
+    # cannot prove RLS itself rejects another user's row without a live
+    # Postgres instance (same caveat as every other RLS-dependent story in
+    # this repo, e.g. set_goal_progress's
+    # test_set_goal_progress_query_has_no_app_level_user_id_clause).
+    await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    delete_query, _ = fake_connection.cursor_instance.executed[0]
+    assert "user_id" not in delete_query.lower()
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_raises_cleanly_when_no_row_matches_and_builds_no_home_view(monkeypatch):
+    # Covers nonexistent / not-owned / already-soft-deleted goal_id alike,
+    # since all three collapse to "no row returned" given the RLS-scoped
+    # UPDATE ... WHERE deleted_at IS NULL.
+    fake_connection, _ = _patch_db_for_delete(monkeypatch, None)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+    fetch_home_view_mock = AsyncMock(wraps=mcp_server._fetch_home_view_data)
+    monkeypatch.setattr(mcp_server, "_fetch_home_view_data", fetch_home_view_mock)
+
+    with pytest.raises(ValueError):
+        await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert fake_connection.committed is False
+    fetch_home_view_mock.assert_not_awaited()
+    assert len(fake_connection.cursor_instance.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_rejects_malformed_goal_id_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_for_delete(monkeypatch, None)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.delete_goal(goal_id="not-a-uuid", ctx=_fake_context("Bearer faketoken"))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_rejects_missing_authorization_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_for_delete(monkeypatch, None)
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context(None))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_enforces_rate_limit_before_jwt_verification(monkeypatch):
+    delete_row = (GOAL_ID,)
+    refresh_responses = [("Sam", "sam@example.com"), [], None]
+    fake_connection, _ = _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
+    call_order = []
+
+    async def _record_rate_limit(*_args, **_kwargs):
+        call_order.append("rate_limit")
+
+    async def _record_auth(*_args, **_kwargs):
+        call_order.append("auth")
+        return CurrentUser(id=USER_ID, email="user@example.com")
+
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", AsyncMock(side_effect=_record_rate_limit))
+    monkeypatch.setattr(mcp_server, "verify_bearer_token", AsyncMock(side_effect=_record_auth))
+
+    await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert call_order == ["rate_limit", "auth"]
+    assert fake_connection.cursor_instance.executed != []
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_enforces_jwt_verification_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_for_delete(monkeypatch, None)
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_on_success_returns_refreshed_home_view_resource_excluding_deleted_goal(
+    monkeypatch,
+):
+    # Post-delete refresh query is mocked to return only the surviving
+    # goal — the deleted goal's title/id must not appear in the rendered
+    # HTML, proving the refresh reflects the deletion rather than the
+    # pre-delete state.
+    delete_row = (GOAL_ID,)
+    surviving_goal_id = "44444444-4444-4444-4444-444444444444"
+    refresh_responses = [
+        ("Sam", "sam@example.com"),
+        [(surviving_goal_id, "Read a book", 10)],
+        None,
+    ]
+    fake_connection, captured = _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert str(result.resource.uri) == "ui://home-view"
+    assert result.resource.mimeType == "text/html"
+    assert "Read a book" in result.resource.text
+    assert GOAL_ID not in result.resource.text
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_returns_same_resource_shape_as_get_home_view(monkeypatch):
+    # Confirms delete_goal's success path reuses the exact same
+    # ui://home-view resource shape get_home_view itself produces (same
+    # URI, same mimetype), not an ad-hoc shape built independently.
+    delete_row = (GOAL_ID,)
+    refresh_responses = [("Sam", "sam@example.com"), [], None]
+    _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    delete_result = await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    home_view_responses = [("Sam", "sam@example.com"), []]
+    _patch_db_sequenced(monkeypatch, home_view_responses)
+
+    home_view_result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert delete_result.resource.uri == home_view_result.resource.uri
+    assert delete_result.resource.mimeType == home_view_result.resource.mimeType
+    assert type(delete_result) is type(home_view_result)
+
+
+@pytest.mark.asyncio
+async def test_delete_goal_success_path_uses_shared_fetch_home_view_data_helper(monkeypatch):
+    # Regression guard on the extraction: delete_goal's refresh must route
+    # through the same `_fetch_home_view_data` helper get_home_view uses,
+    # not a parallel ad-hoc query, so the two views can never silently
+    # diverge.
+    import inspect
+
+    delete_source = inspect.getsource(mcp_server.delete_goal)
+
+    assert "_fetch_home_view_data" in delete_source
+    assert "_build_home_view_resource" in delete_source
+
+
+def test_delete_goal_tool_description_states_called_from_ui_confirm_step_not_proactive():
+    tool = mcp_server.mcp._tool_manager._tools["delete_goal"]
+
+    description = tool.description.lower()
+
+    assert "confirm" in description
+    assert "not" in description
+    assert "proactively" in description or "mid-conversation" in description

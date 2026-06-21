@@ -780,3 +780,248 @@ helper introduced no behavior change: its existing test files were left
 unmodified and still pass. AC5's RLS-exclusion path is verified only at the
 app/render level (no live Postgres/Supabase instance) — same recurring
 caveat class as every other story in this repo.
+
+## LFC-STORY-005
+
+**Verdict: PASS WITH CAVEATS**
+
+Backend added `delete_goal` to `app/mcp_server.py` and extracted
+`_fetch_home_view_data(user_id)` out of `get_home_view`'s body (now the
+second real call site, shared with `delete_goal`). Read `delete_goal`,
+`get_home_view`, and `_fetch_home_view_data` in full directly rather than
+trusting the backend report, per this story's instruction to verify
+carefully given the LFC-003 PR-review precedent about careless refactor
+claims.
+
+### Direct source verification (before writing any test)
+
+- `delete_goal`'s ordering is `enforce_mcp_rate_limit(request)` ->
+  `verify_bearer_token(...)` -> `UUID(goal_id)` parse -> DB call, identical
+  to every other tool in this file.
+- The soft-delete SQL is exactly
+  `UPDATE goals SET deleted_at = now() WHERE id = %s AND deleted_at IS NULL
+  RETURNING id`, through `get_rls_connection(current_user.id)`, with no
+  app-level `WHERE user_id` clause — confirmed byte-for-byte against the
+  existing REST `DELETE /goals/{id}` handler's SQL. **It is a genuine
+  `UPDATE`, never a `DELETE FROM` statement.**
+- When `fetchone()` returns `None` (no row matched: nonexistent, not owned,
+  or already soft-deleted), the code does **not** call `conn.commit()` and
+  raises `ValueError` before ever calling `_fetch_home_view_data` or
+  `_build_home_view_resource` — confirmed by reading the control flow
+  (`if row is not None: await conn.commit()` followed by
+  `if row is None: raise ValueError(...)`, both inside the same `async
+  with` block, before the refresh call below it).
+- On success, the code commits, then calls
+  `_fetch_home_view_data(current_user.id)` followed by
+  `_build_home_view_resource(...)` — the exact same two functions
+  `get_home_view` itself calls, not a parallel ad-hoc implementation.
+- `get_home_view`'s own body was reduced to
+  `home_view_data = await _fetch_home_view_data(current_user.id)` followed
+  by `_build_home_view_resource(home_view_data)`, wrapped in the same
+  try/except it always had. The extracted helper's SQL (user row lookup,
+  goal rows, per-goal latest-update lookup) is character-for-character what
+  used to live inline in `get_home_view`, confirmed by diffing the
+  extracted function body against the pre-extraction version inferred from
+  the existing passing test expectations (e.g. exact `SELECT` column lists,
+  `ORDER BY created_at DESC`, no `user_id`/`deleted_at` clause).
+
+### Regression check: existing `get_home_view` tests, run unmodified
+
+`tests/unit/test_mcp_server.py`'s `get_home_view`-specific tests and the
+entirety of `tests/feature/test_mcp_get_home_view.py` were **not modified**
+in this pass (confirmed via `git diff --stat` showing zero changes to
+`test_mcp_get_home_view.py`). Ran them in isolation before writing any new
+test:
+
+```
+.venv/bin/python -m pytest -q tests/unit/test_mcp_server.py tests/feature/test_mcp_get_home_view.py
+50 passed in 1.22s
+```
+
+All 50 pre-existing `get_home_view`-related tests pass unmodified — the
+`_fetch_home_view_data` extraction is confirmed behavior-preserving for
+`get_home_view`, the main regression risk flagged for this story.
+
+### New tests written, mapped to acceptance criteria
+
+**Unit tests** (`tests/unit/test_mcp_server.py`, 11 new, using a new
+`_DeleteThenRefreshCursor`/`_DeleteThenRefreshConnection` fake modeling the
+tool's two-phase query pattern — first the delete `UPDATE`, then the
+refresh queries only on success):
+
+1. **AC1** — `test_delete_goal_soft_deletes_via_update_never_a_hard_delete`:
+   asserts the executed SQL text contains `UPDATE goals`, contains no
+   `DELETE FROM` and does not start with `DELETE`, contains
+   `SET deleted_at = now()` and the exact `WHERE` clause, with `goal_id` as
+   the only parameter; confirms `conn.commit()` was called.
+   `test_delete_goal_query_has_no_app_level_user_id_clause` confirms no
+   `user_id` substring anywhere in the query text.
+2. **AC2** — `test_delete_goal_raises_cleanly_when_no_row_matches_and_builds_no_home_view`:
+   mocks zero rows back from the `UPDATE` (covers nonexistent/not-owned/
+   already-deleted alike, since all three collapse to "no row returned"
+   given the RLS-scoped `WHERE deleted_at IS NULL`), asserts a clean
+   `ValueError`, `committed is False`, exactly one query executed (the
+   `UPDATE` itself, no refresh queries attempted), and — using
+   `AsyncMock(wraps=...)` on the real `_fetch_home_view_data` — asserts it
+   was **never awaited** in this failure path, directly verifying "no home
+   view returned/built" rather than just inferring it from query count.
+3. **AC3** — `test_delete_goal_enforces_rate_limit_before_jwt_verification`
+   (records call order via side-effecting mocks, asserts
+   `["rate_limit", "auth"]`) and
+   `test_delete_goal_enforces_jwt_verification_before_db_call` (auth raises
+   `PermissionError`, asserts zero queries executed). Also
+   `test_delete_goal_rejects_malformed_goal_id_before_db_call` and
+   `test_delete_goal_rejects_missing_authorization_before_db_call` for the
+   surrounding ordering.
+4. **AC4** — `test_delete_goal_on_success_returns_refreshed_home_view_resource_excluding_deleted_goal`:
+   mocks the post-delete refresh query to return only a surviving goal
+   (`"Read a book"`, a different UUID), asserts the rendered HTML contains
+   the surviving goal's title and does **not** contain the deleted goal's
+   id anywhere in the text. `test_delete_goal_returns_same_resource_shape_as_get_home_view`
+   calls both `delete_goal` and `get_home_view` against equivalent mocked
+   data in the same test and asserts `delete_result.resource.uri ==
+   home_view_result.resource.uri` (`ui://home-view` for both),
+   `mimeType` equality, and `type(...)` equality — proving this is the same
+   resource shape, not an ad-hoc one built independently.
+   `test_delete_goal_success_path_uses_shared_fetch_home_view_data_helper`
+   inspects `delete_goal`'s source directly and asserts it references both
+   `_fetch_home_view_data` and `_build_home_view_resource` by name, as a
+   permanent regression guard against a future change silently
+   reintroducing a parallel ad-hoc refresh implementation.
+5. **AC5** — `test_delete_goal_tool_description_states_called_from_ui_confirm_step_not_proactive`:
+   asserts the registered tool's description contains "confirm" and
+   ("not"+"proactively"/"mid-conversation"), matching the actual shipped
+   description text ("intended to be called from the goal-detail view's
+   confirm-delete UI action after the user has explicitly confirmed, not
+   something you should invoke proactively mid-conversation").
+
+**Feature tests** (`tests/feature/test_mcp_delete_goal.py`, 5 new, mirroring
+`test_mcp_get_home_view.py`'s/`test_mcp_get_goal_detail_view.py`'s real
+wire-protocol pattern — `initialize` -> `notifications/initialized` ->
+`tools/call` over `httpx.ASGITransport`):
+
+1. The successful-delete path through the live MCP transport: asserts
+   `isError` absent, `text/html` present, the surviving goal's title
+   present, the deleted goal's id absent anywhere in the wire-level
+   response body, `committed is True`, and the executed delete SQL is a
+   genuine `UPDATE` (not `DELETE FROM`) — re-verifying AC1 and AC4 at the
+   wire level, not just the in-process unit level.
+2. Missing-JWT rejection before any DB call.
+3. Expired-JWT rejection before any DB call.
+4. Nonexistent/already-deleted `goal_id` (zero rows from the `UPDATE`)
+   failing cleanly through the live transport: `isError:true`,
+   `committed is False`, exactly one query executed.
+5. Malformed (`"not-a-uuid"`) `goal_id` rejected before any DB call,
+   delivered through the real JSON-RPC `tools/call` arguments.
+
+### RLS caveat (AC2, Requirement 3/9) — same recurring caveat class
+
+Same caveat class as every other RLS-dependent story in this repo: the
+absence of an app-level `user_id` clause is confirmed by direct inspection
+of the executed SQL string, and the not-owned/already-deleted path (AC2) is
+exercised only with a mocked zero-row result. Neither proves the
+`goals_update_own` RLS policy itself actually rejects another user's goal
+or an already-soft-deleted row against a live Postgres/Supabase instance —
+no Docker/local Postgres was available in this sandbox. This must be
+considered an unverified assumption, not a settled fact, until exercised
+against a real instance — identical framing to every prior story's
+equivalent caveat (e.g. LFC-STORY-002's `set_goal_progress`,
+LFC-STORY-003's `get_home_view`, LFC-STORY-004's `get_goal_detail_view`).
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root twice in a row to
+rule out flakiness:
+
+- Run 1: **203 passed**, 0 failed, 36 warnings (same pre-existing
+  deprecation warnings as before, unrelated to this story).
+- Run 2: **203 passed**, 0 failed, 36 warnings — identical result, no
+  flakiness.
+
+203 = 187 (prior baseline from LFC-STORY-004) + 11 new unit tests
+(`test_mcp_server.py`) + 5 new feature tests (`test_mcp_delete_goal.py`) =
+203. The full suite run confirms this exactly: **203 passed, 0 failed**,
+across two consecutive runs.
+
+### Totals: 16 new automated tests (11 unit, 5 feature), 203/203 full suite
+passing across two consecutive runs, 0 failed, no flakiness. All 5
+acceptance criteria are covered by at least one test each. The
+`get_home_view` regression check confirms `_fetch_home_view_data`'s
+extraction is fully behavior-preserving: all 50 of its pre-existing,
+unmodified tests still pass. AC2's RLS-rejection path is verified only at
+the app/query level (no live Postgres/Supabase instance) — same recurring
+caveat class as every other story in this repo.
+
+## Feature Summary — LFC-004-mcp-ui-home-goal-views
+
+All 5 stories in this feature (LFC-STORY-001 through LFC-STORY-005) are now
+implemented and tested:
+
+- LFC-STORY-001: `goals.progress_percent` migration (PASS WITH CAVEATS)
+- LFC-STORY-002: `set_goal_progress` MCP tool (PASS WITH CAVEATS)
+- LFC-STORY-003: `get_home_view` tool (PASS WITH CAVEATS)
+- LFC-STORY-004: `get_goal_detail_view` MCP tool (PASS WITH CAVEATS)
+- LFC-STORY-005: `delete_goal` MCP tool (PASS WITH CAVEATS)
+
+**Total new automated tests across the whole feature: 0 + 14 + 31 + 32 + 16
+= 93** (LFC-STORY-001: 0 new automated tests per its test-results section;
+LFC-STORY-002: 14; LFC-STORY-003: 31; LFC-STORY-004: 32; LFC-STORY-005: 16).
+Final full-suite run for the feature: **203 passed, 0 failed**, run twice
+consecutively with identical results — no flakiness, no regressions across
+the entire feature, on top of the pre-existing suite carried over from
+LFC-003-updates and earlier auth/infra stories.
+
+**All recurring caveats carried forward across this entire feature — none
+resolved by this feature, all should be revisited before this feature is
+considered production-ready:**
+
+1. **TOP ITEM — AC5 of LFC-STORY-003 (can a UI click in a real MCP-UI host
+   actually invoke a tool call via `postMessage`, or only inject a chat
+   message?) is still completely unverified.** No live MCP-UI host was
+   ever available in any sandbox across all five stories of this feature.
+   Every card-click (home -> detail), every delete-confirm action, and
+   every "continue this conversation"/"create a new goal"/"just want to
+   talk" entry was implemented and tested only against the assumption that
+   the MCP-UI host-side `postMessage` convention supports a UI element
+   invoking a tool call directly. This is the single biggest open risk in
+   the entire feature: if direct tool-invocation from rendered HTML turns
+   out unsupported by the actual MCP-UI spec/a real host, **every
+   interactive element shipped by this feature** (card-click navigation,
+   `delete_goal`'s confirm action, and any other structured UI action) must
+   fall back to chat-message injection instead of a direct tool call. This
+   must be verified against a real MCP-UI host before this feature is
+   considered done — it is not a routine caveat like the RLS items below,
+   it is a potential rework of this feature's core interaction model.
+2. **RLS policies unverified against a live database, across every story
+   in this feature.** No Docker daemon and no local `psql` were available
+   in any sandbox session for any of the five stories. Every RLS-dependent
+   behavior — `goals_update_own`'s enforcement for `set_goal_progress` and
+   `delete_goal`, `goals_select_own`'s cross-user/soft-delete exclusion for
+   `get_home_view` and `get_goal_detail_view` — was verified only by
+   inspecting the executed SQL text (confirming no app-level `user_id`
+   filter exists) and by mocking zero-row responses to simulate RLS
+   rejection. None of this proves the actual Postgres RLS policies behave
+   as assumed against a real instance. Before production: seed two users'
+   goals, soft-delete one, and confirm `get_home_view`/`get_goal_detail_view`
+   never return another user's or a soft-deleted goal, and that
+   `set_goal_progress`/`delete_goal` are rejected for a `goal_id` not owned
+   by the caller.
+3. **MCP `TransportSecurityMiddleware.allowed_hosts` deployment risk,
+   carried over unresolved from LFC-003-updates.** Still defaults to `[]`
+   with DNS-rebinding protection on; in a real deployment behind a reverse
+   proxy this would 421-reject every `/mcp` request (including every tool
+   added by this feature) unless `allowed_hosts` is explicitly configured
+   for the deployed hostname. Unchanged by this feature — still unresolved.
+4. **`strategy.md`'s "MCP-UI is read-only" statement is now actively
+   contradicted by this feature's shipped behavior.** This feature ships
+   interactive cards (card-click navigates to a detail view via a direct
+   tool call, pending verification of item 1 above) and an interactive
+   delete-confirm action (`delete_goal`, a write operation invoked directly
+   from rendered UI) — this is no longer read-only by any reasonable
+   definition. `strategy.md` has not been updated via `/strategize` to
+   reflect this across any story in this feature. This is flagged as an
+   outstanding documentation/process item, not a code defect: the
+   implementation matches what `architecture.md`/`requirements.md` for this
+   feature actually specify, but the project's standing strategic record is
+   now stale and should be revisited via `/strategize` before this feature
+   (or a similar one) ships further interactive surface.
