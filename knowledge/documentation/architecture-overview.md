@@ -43,6 +43,10 @@ per-user data access on top of Postgres.
   connection.
 - `app/main.py` — the FastAPI app instance, route definitions, and the
   rate limiter.
+- `app/schemas.py` — Pydantic request/response models for body-validated
+  endpoints (first introduced for the `goals` resource). Request validation
+  happens once, at this boundary; handlers trust validated input rather than
+  re-checking it deeper in the call stack.
 
 ### Identity: Supabase Auth
 
@@ -100,6 +104,18 @@ schema changes outside of Alembic.
 - **Secrets**: Supabase URL/keys and the database connection string are
   read only from environment variables; `.env` is gitignored, and
   `.env.example` documents the required variables with placeholder values.
+
+### Soft delete as an RLS-enforced pattern
+
+The `goals` table (added in LFC-002) is the first user-owned table beyond
+`users`, and establishes a second reusable pattern on top of the base RLS
+template: soft delete enforced inside the RLS policies themselves
+(`deleted_at IS NULL` baked into the `SELECT`/`UPDATE` `USING` clauses)
+rather than relied upon as a query-level filter, with no `DELETE` policy
+created at all — making hard-delete structurally impossible for any code
+path that goes through `get_rls_connection`. Any future user-owned table
+that needs soft delete (e.g. a later suggestions/check-ins feature) should
+follow this same approach rather than re-deriving it.
 
 ## What's deliberately not built yet
 

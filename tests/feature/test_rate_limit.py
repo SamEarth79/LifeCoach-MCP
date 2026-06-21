@@ -25,6 +25,9 @@ class _FakeCursor:
     async def fetchone(self):
         return self._row
 
+    async def fetchall(self):
+        return [self._row] if self._row is not None else []
+
     async def __aenter__(self):
         return self
 
@@ -38,6 +41,9 @@ class _FakeConnection:
 
     def cursor(self):
         return _FakeCursor(self._row)
+
+    async def commit(self):
+        return None
 
 
 def _override_current_user():
@@ -160,6 +166,209 @@ def test_users_me_rate_limit_threshold_is_driven_by_settings_not_hardcoded(monke
         reloaded_main.limiter.reset()
         monkeypatch.undo()
         _reload_main_with_real_settings()
+
+
+def test_create_goal_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    body = {"title": "Run a marathon"}
+
+    first = client.post("/goals", json=body, headers=headers)
+    second = client.post("/goals", json=body, headers=headers)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+
+def test_create_goal_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    body = {"title": "Run a marathon"}
+
+    client.post("/goals", json=body, headers=headers)
+    client.post("/goals", json=body, headers=headers)
+    third = client.post("/goals", json=body, headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_create_goal_and_users_me_enforce_the_same_configured_threshold(low_limit_app):
+    """
+    AC5: POST /goals is subject to the existing rate limiter, the same as
+    /users/me — both routes use the shared `enforce_rate_limit` dependency
+    and the same `per_ip_rate_limit` string derived from Settings, so both
+    independently reject a client's 3rd request under the same RATE_LIMIT_*
+    configuration (slowapi tracks each decorated route as its own bucket,
+    so this asserts equivalent enforcement per route rather than a single
+    shared counter across routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    body = {"title": "Run a marathon"}
+    client.post("/goals", json=body, headers=headers)
+    client.post("/goals", json=body, headers=headers)
+    goals_third = client.post("/goals", json=body, headers=headers)
+
+    assert users_me_third.status_code == 429
+    assert goals_third.status_code == 429
+
+
+def test_list_goals_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    first = client.get("/goals", headers=headers)
+    second = client.get("/goals", headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_list_goals_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    client.get("/goals", headers=headers)
+    client.get("/goals", headers=headers)
+    third = client.get("/goals", headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_list_goals_enforces_the_same_configured_threshold_as_other_routes(low_limit_app):
+    """
+    AC6 (LFC-STORY-003): GET /goals is subject to the existing rate limiter,
+    the same as /users/me and POST /goals — all three routes use the shared
+    `enforce_rate_limit` dependency and the same `per_ip_rate_limit` string
+    derived from Settings, so each independently rejects a client's 3rd
+    request under the same RATE_LIMIT_* configuration (slowapi tracks each
+    decorated route as its own bucket, so this asserts equivalent
+    enforcement per route rather than a single shared counter across
+    routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    client.get("/goals", headers=headers)
+    client.get("/goals", headers=headers)
+    goals_third = client.get("/goals", headers=headers)
+
+    assert users_me_third.status_code == 429
+    assert goals_third.status_code == 429
+
+
+def test_update_goal_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    first = client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+    second = client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_update_goal_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+    body = {"title": "Updated"}
+
+    client.patch(f"/goals/{goal_id}", json=body, headers=headers)
+    client.patch(f"/goals/{goal_id}", json=body, headers=headers)
+    third = client.patch(f"/goals/{goal_id}", json=body, headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_update_goal_enforces_the_same_configured_threshold_as_other_routes(low_limit_app):
+    """
+    AC5: PATCH /goals/{goal_id} is subject to the existing rate limiter, the
+    same as /users/me, POST /goals, and GET /goals — all routes use the
+    shared `enforce_rate_limit` dependency and the same `per_ip_rate_limit`
+    string derived from Settings, so each independently rejects a client's
+    3rd request under the same RATE_LIMIT_* configuration (slowapi tracks
+    each decorated route as its own bucket, so this asserts equivalent
+    enforcement per route rather than a single shared counter across
+    routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+    client.patch(f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers)
+    update_goal_third = client.patch(
+        f"/goals/{goal_id}", json={"title": "Updated"}, headers=headers
+    )
+
+    assert users_me_third.status_code == 429
+    assert update_goal_third.status_code == 429
+
+
+def test_delete_goal_allows_requests_within_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    first = client.delete(f"/goals/{goal_id}", headers=headers)
+    second = client.delete(f"/goals/{goal_id}", headers=headers)
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+
+
+def test_delete_goal_rejects_request_exceeding_the_configured_limit(low_limit_app):
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    client.delete(f"/goals/{goal_id}", headers=headers)
+    client.delete(f"/goals/{goal_id}", headers=headers)
+    third = client.delete(f"/goals/{goal_id}", headers=headers)
+
+    assert third.status_code == 429
+
+
+def test_delete_goal_enforces_the_same_configured_threshold_as_other_routes(low_limit_app):
+    """
+    AC6: DELETE /goals/{goal_id} is subject to the existing rate limiter,
+    the same as /users/me, POST /goals, GET /goals, and PATCH
+    /goals/{goal_id} — all routes use the shared `enforce_rate_limit`
+    dependency and the same `per_ip_rate_limit` string derived from
+    Settings, so each independently rejects a client's 3rd request under
+    the same RATE_LIMIT_* configuration (slowapi tracks each decorated
+    route as its own bucket, so this asserts equivalent enforcement per
+    route rather than a single shared counter across routes).
+    """
+    client = TestClient(low_limit_app.app)
+    headers = {"Authorization": "Bearer irrelevant"}
+    goal_id = "33333333-3333-3333-3333-333333333333"
+
+    client.get("/users/me", headers=headers)
+    client.get("/users/me", headers=headers)
+    users_me_third = client.get("/users/me", headers=headers)
+
+    client.delete(f"/goals/{goal_id}", headers=headers)
+    client.delete(f"/goals/{goal_id}", headers=headers)
+    delete_goal_third = client.delete(f"/goals/{goal_id}", headers=headers)
+
+    assert users_me_third.status_code == 429
+    assert delete_goal_third.status_code == 429
 
 
 def test_health_endpoint_is_never_rate_limited(low_limit_app):
