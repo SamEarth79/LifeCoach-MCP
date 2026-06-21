@@ -40,12 +40,12 @@ def test_falls_back_to_remote_address_when_fewer_hops_than_trusted_proxies(
     monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
     get_settings.cache_clear()
 
-    import app.main as main_module
+    import app.rate_limit as rate_limit_module
 
-    monkeypatch.setattr(main_module, "settings", get_settings())
+    monkeypatch.setattr(rate_limit_module, "settings", get_settings())
 
     request = _request_with({"X-Forwarded-For": "198.51.100.7"}, client_host="10.0.0.1")
 
-    assert main_module.get_client_ip(request) == "10.0.0.1"
+    assert rate_limit_module.get_client_ip(request) == "10.0.0.1"
 
     get_settings.cache_clear()

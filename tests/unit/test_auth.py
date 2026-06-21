@@ -230,3 +230,61 @@ async def test_failed_auth_does_not_log_email_or_pii(monkeypatch, caplog):
     log_output = "\n".join(record.getMessage() for record in caplog.records)
     assert EMAIL not in log_output
     assert token not in log_output
+
+
+@pytest.mark.asyncio
+async def test_verify_bearer_token_returns_current_user_for_valid_header(monkeypatch):
+    executed_queries, _ = _patch_db(monkeypatch)
+    token = _make_token()
+
+    user = await auth.verify_bearer_token(f"Bearer {token}")
+
+    assert user.id == USER_ID
+    assert user.email == EMAIL
+    assert len(executed_queries) == 1
+
+
+@pytest.mark.asyncio
+async def test_verify_bearer_token_raises_401_for_missing_header(monkeypatch):
+    executed_queries, _ = _patch_db(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_bearer_token(None)
+
+    assert exc_info.value.status_code == 401
+    assert executed_queries == []
+
+
+@pytest.mark.asyncio
+async def test_verify_bearer_token_raises_401_for_non_bearer_scheme(monkeypatch):
+    executed_queries, _ = _patch_db(monkeypatch)
+    token = _make_token()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_bearer_token(f"Basic {token}")
+
+    assert exc_info.value.status_code == 401
+    assert executed_queries == []
+
+
+@pytest.mark.asyncio
+async def test_verify_bearer_token_raises_401_for_malformed_header(monkeypatch):
+    executed_queries, _ = _patch_db(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_bearer_token("not-a-bearer-header")
+
+    assert exc_info.value.status_code == 401
+    assert executed_queries == []
+
+
+@pytest.mark.asyncio
+async def test_verify_bearer_token_raises_401_for_expired_token(monkeypatch):
+    executed_queries, _ = _patch_db(monkeypatch)
+    token = _make_token(exp=0)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth.verify_bearer_token(f"Bearer {token}")
+
+    assert exc_info.value.status_code == 401
+    assert executed_queries == []
