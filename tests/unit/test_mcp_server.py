@@ -706,3 +706,218 @@ def test_get_home_view_tool_description_mentions_home_screen():
     description = tool.description.lower()
 
     assert "home" in description
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_returns_embedded_resource_with_title_description_progress_and_updates(
+    monkeypatch,
+):
+    goal_row = (GOAL_ID, "Run a 5k", "Train three times a week", 42)
+    update_rows = [("Ran 3 miles today", CREATED_AT)]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, update_rows])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert result.resource.uri.scheme == "ui"
+    assert result.resource.mimeType == "text/html"
+    assert "Run a 5k" in result.resource.text
+    assert "Train three times a week" in result.resource.text
+    assert "42%" in result.resource.text
+    assert "Ran 3 miles today" in result.resource.text
+    assert "transcript" not in result.resource.text.lower()
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_query_selects_only_content_and_created_at_for_updates(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    update_rows = []
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, update_rows])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    updates_query, updates_params = fake_connection.cursor_instance.executed[1]
+    assert "SELECT content, created_at" in updates_query
+    assert "transcript" not in updates_query.lower()
+    assert "LIMIT 5" in updates_query
+    assert updates_params == (GOAL_ID,)
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_empty(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert "No updates yet." in result.resource.text
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_renders_no_estimate_yet_when_progress_percent_is_null(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    body = result.resource.text.split("<body>")[1]
+    assert "no-estimate" in body
+    assert "0%" not in body
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_returns_failure_resource_when_goal_row_missing(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [None])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert "Run a 5k" not in result.resource.text
+    assert "isn't available" in result.resource.text or "isn&#x27;t available" in result.resource.text
+    # Only one query (the goal lookup) was attempted — no second query for
+    # updates is issued once the goal row comes back empty, and crucially
+    # no title/progress/updates section is rendered alongside the error.
+    assert len(fake_connection.cursor_instance.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_returns_failure_resource_on_unhandled_db_error_instead_of_raising(
+    monkeypatch,
+):
+    class _BoomCursor:
+        async def execute(self, *_args, **_kwargs):
+            raise RuntimeError("db exploded")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc_info):
+            return False
+
+    class _BoomConnection:
+        def cursor(self):
+            return _BoomCursor()
+
+    @asynccontextmanager
+    async def fake_get_rls_connection(_user_id):
+        yield _BoomConnection()
+
+    monkeypatch.setattr(mcp_server, "get_rls_connection", fake_get_rls_connection)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert isinstance(result, EmbeddedResource)
+    assert "Run a 5k" not in result.resource.text
+    assert "isn't available" in result.resource.text or "isn&#x27;t available" in result.resource.text
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_rejects_malformed_goal_id_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.get_goal_detail_view(goal_id="not-a-uuid", ctx=_fake_context("Bearer faketoken"))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_enforces_rate_limit_before_jwt_verification(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    call_order = []
+
+    async def _record_rate_limit(*_args, **_kwargs):
+        call_order.append("rate_limit")
+
+    async def _record_auth(*_args, **_kwargs):
+        call_order.append("auth")
+        return CurrentUser(id=USER_ID, email="user@example.com")
+
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", AsyncMock(side_effect=_record_rate_limit))
+    monkeypatch.setattr(mcp_server, "verify_bearer_token", AsyncMock(side_effect=_record_auth))
+
+    await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert call_order == ["rate_limit", "auth"]
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_enforces_jwt_verification_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context(None))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_jwt_verification_before_uuid_validation_only_matters_after_db_call_check(
+    monkeypatch,
+):
+    # goal_id UUID parsing must happen before any DB call, but per the
+    # story's AC6 ordering (rate-limit -> auth -> uuid-validation-then-db),
+    # auth failure with a malformed goal_id should still surface the auth
+    # failure, not a UUID parse error, and no DB call should happen either way.
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.get_goal_detail_view(goal_id="not-a-uuid", ctx=_fake_context(None))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_get_goal_detail_view_query_has_no_app_level_user_id_clause(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    goal_query, goal_params = fake_connection.cursor_instance.executed[0]
+    assert "user_id" not in goal_query.lower()
+    assert captured["user_id"] == USER_ID
+
+
+def test_get_goal_detail_view_tool_description_mentions_goal_detail():
+    tool = mcp_server.mcp._tool_manager._tools["get_goal_detail_view"]
+
+    description = tool.description.lower()
+
+    assert "detail" in description
+
+
+def test_build_embedded_html_resource_helper_used_by_both_home_and_detail_view_builders():
+    # Regression guard on the refactor: both resource builders must route
+    # through the same shared helper rather than constructing
+    # EmbeddedResource/TextResourceContents independently, so a future
+    # change to the wrapping shape only needs to happen in one place.
+    import inspect
+
+    home_source = inspect.getsource(mcp_server._build_home_view_resource)
+    detail_source = inspect.getsource(mcp_server._build_goal_detail_view_resource)
+
+    assert "_build_embedded_html_resource" in home_source
+    assert "_build_embedded_html_resource" in detail_source

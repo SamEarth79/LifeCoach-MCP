@@ -10,7 +10,14 @@ from app.config import get_settings
 from app.db import get_rls_connection
 from app.rate_limit import enforce_mcp_rate_limit
 from app.schemas import GoalProgressUpdate, UpdateCreate, UpdateListItem
-from app.ui_templates import HomeGoalCard, HomeViewData, render_home_view
+from app.ui_templates import (
+    GoalDetailUpdate,
+    GoalDetailViewData,
+    HomeGoalCard,
+    HomeViewData,
+    render_goal_detail_view,
+    render_home_view,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,14 +181,24 @@ async def set_goal_progress(
     }
 
 
-def _build_home_view_resource(data: HomeViewData) -> EmbeddedResource:
+def _build_embedded_html_resource(uri: str, html_text: str) -> EmbeddedResource:
     return EmbeddedResource(
         type="resource",
         resource=TextResourceContents(
-            uri="ui://home-view",
+            uri=uri,
             mimeType="text/html",
-            text=render_home_view(data),
+            text=html_text,
         ),
+    )
+
+
+def _build_home_view_resource(data: HomeViewData) -> EmbeddedResource:
+    return _build_embedded_html_resource("ui://home-view", render_home_view(data))
+
+
+def _build_goal_detail_view_resource(data: GoalDetailViewData) -> EmbeddedResource:
+    return _build_embedded_html_resource(
+        "ui://goal-detail-view", render_goal_detail_view(data)
     )
 
 
@@ -270,4 +287,94 @@ async def get_home_view(ctx: Context) -> EmbeddedResource:
 
     return _build_home_view_resource(
         HomeViewData(greeting_name=display_name or email, goals=goals)
+    )
+
+
+@mcp.tool(
+    description=(
+        "Return the goal-detail screen UI for one of the user's goals: "
+        "its full title and description, progress, a short list of "
+        "recent updates, a 'continue this conversation' action, and a "
+        "delete action behind a confirm step. Call this when the user "
+        "taps into a specific goal, not as a source of goal data for "
+        "your own reasoning — use list_updates/other tools for that."
+    )
+)
+async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        validated_goal_id = UUID(goal_id)
+    except ValueError as exc:
+        logger.warning("get_goal_detail_view validation failed: %s", exc)
+        raise ValueError("goal_id must be a valid UUID") from exc
+
+    try:
+        async with get_rls_connection(current_user.id) as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    SELECT id, title, description, progress_percent
+                    FROM goals
+                    WHERE id = %s
+                    """,
+                    (str(validated_goal_id),),
+                )
+                goal_row = await cursor.fetchone()
+
+                if goal_row is None:
+                    return _build_goal_detail_view_resource(
+                        GoalDetailViewData(
+                            id=None,
+                            title=None,
+                            description=None,
+                            progress_percent=None,
+                            recent_updates=[],
+                            error="This goal isn't available.",
+                        )
+                    )
+
+                returned_id, title, description, progress_percent = goal_row
+
+                await cursor.execute(
+                    """
+                    SELECT content, created_at
+                    FROM updates
+                    WHERE goal_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 5
+                    """,
+                    (str(returned_id),),
+                )
+                update_rows = await cursor.fetchall()
+    except Exception:
+        logger.exception("get_goal_detail_view failed for caller %s", current_user.id)
+        return _build_goal_detail_view_resource(
+            GoalDetailViewData(
+                id=None,
+                title=None,
+                description=None,
+                progress_percent=None,
+                recent_updates=[],
+                error="This goal isn't available.",
+            )
+        )
+
+    recent_updates = [
+        GoalDetailUpdate(content=content, created_at=created_at.isoformat())
+        for content, created_at in update_rows
+    ]
+
+    return _build_goal_detail_view_resource(
+        GoalDetailViewData(
+            id=str(returned_id),
+            title=title,
+            description=description,
+            progress_percent=progress_percent,
+            recent_updates=recent_updates,
+        )
     )

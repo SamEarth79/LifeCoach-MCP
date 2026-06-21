@@ -503,3 +503,280 @@ caveat class as every other RLS-dependent story in this repo. AC5 (whether
 **cannot be tested at all in this sandbox** — no live MCP-UI host exists —
 and is recorded here as an explicit open verification item rather than
 silently passed.
+
+## LFC-STORY-004
+
+**Verdict: PASS WITH CAVEATS** — same RLS caveat class as every other
+RLS-dependent story in this repo, plus the same untestable-in-sandbox
+external-contract caveat already recorded for LFC-STORY-003's AC5
+(`postMessage`-based tool invocation against a real MCP-UI host).
+
+### Implementation verified against the reports (not trusted at face value)
+
+Read `app/mcp_server.py::get_goal_detail_view` and
+`app/ui_templates.py::GoalDetailUpdate`/`GoalDetailViewData`/
+`render_goal_detail_view` in full before writing any test. Confirmed:
+
+- `get_goal_detail_view` calls `enforce_mcp_rate_limit(request)` before
+  `verify_bearer_token(...)` — identical ordering to every other tool in this
+  module. `goal_id` is parsed via `UUID(goal_id)` (raising `ValueError`
+  before any DB call) before the rate-limit/auth-then-DB-call sequence
+  reaches `get_rls_connection`.
+- The goal-row query is `SELECT id, title, description, progress_percent
+  FROM goals WHERE id = %s` with no app-level `user_id`/`deleted_at` clause —
+  relies entirely on the existing `goals_select_own` RLS policy, same
+  pattern as `get_home_view`/`list_goals`.
+- When the goal row is `None` (nonexistent/not-owned/soft-deleted), the tool
+  returns a `GoalDetailViewData(id=None, title=None, description=None,
+  progress_percent=None, recent_updates=[], error="This goal isn't
+  available.")`-backed `EmbeddedResource` directly — it does not raise, and
+  it does not issue the second (updates) query at all once the goal row
+  comes back empty.
+- The updates query is `SELECT content, created_at FROM updates WHERE
+  goal_id = %s ORDER BY created_at DESC LIMIT 5` — `transcript` is never
+  selected, identical discipline to `list_updates`.
+- Any unhandled exception during the whole block is caught and converted to
+  the same failure-state `EmbeddedResource`, never propagated raw.
+- `_build_embedded_html_resource(uri, html_text)` is a new shared helper;
+  both `_build_home_view_resource` and the new
+  `_build_goal_detail_view_resource` call it rather than constructing
+  `EmbeddedResource`/`TextResourceContents` independently — confirmed by
+  reading both functions' source directly (also asserted by a dedicated
+  regression test, see below).
+- `render_goal_detail_view` HTML-escapes `title`, `description`, each
+  update's `content`, and `error` via `html.escape` before interpolation.
+  Reuses `_progress_ring(...)` unchanged — no second ring/no-estimate
+  implementation exists in the detail-view code.
+- An empty `recent_updates` list renders the literal `<p
+  class="no-updates">No updates yet.</p>` line, not a blank/missing section.
+- **Re-verified the "continue conversation" title-handling approach by
+  direct code reading, then by an actual hostile-input test (see below):**
+  the goal's title is rendered as `html.escape`d DOM text content inside
+  `<p class="detail-title" id="goal-title-{safe_id}">{safe_title}</p>` — it
+  is never placed inside any `onclick` attribute. The continue button's
+  `onclick` is `lifecoachContinueGoal('{safe_id}')`, where `safe_id` is the
+  goal's UUID (`html.escape`d, though a UUID has nothing to escape) — never
+  any fragment of the title. At click time, `lifecoachContinueGoal` reads
+  the title back via `document.getElementById("goal-title-" +
+  goalId).textContent`, which returns the *decoded* text (browser undoes the
+  HTML-entity-escaping when populating `textContent`'s source, i.e. a
+  `&lt;script&gt;` entity in markup becomes the literal string
+  `<script>...` in `.textContent`, never re-parsed as markup), then passes
+  that as a string argument to `lifecoachSendPrompt(...)` — a `postMessage`
+  payload field, not an HTML/JS-string-literal-context insertion. This is
+  the correct fix for the JS-string-breakout risk class flagged in
+  LFC-STORY-003's test-results (where the *goal id*, not free text, was the
+  only interpolated value) — here free text (the title) is involved, and the
+  implementation avoids ever interpolating it into any onclick JS string by
+  routing it through DOM `textContent` instead.
+- The delete action is a genuine two-stage confirm: first click on
+  `#delete-entry-{id}` (`lifecoachShowDeleteConfirm`) hides the delete button
+  and reveals `#delete-confirm-{id}`; only its `confirm` button calls
+  `lifecoachConfirmDelete('{id}')` -> `lifecoachSendTool("delete_goal", {
+  goal_id: goalId })`, using only the trusted UUID — title is never involved
+  in the delete path at all.
+- No tab-bar or "Total Days"/"Current Streak" markup anywhere in the
+  rendered output, matching architecture.md's explicit exclusions.
+
+### Layers required
+
+- Unit: required for both `render_goal_detail_view` (new pure rendering
+  logic) and `get_goal_detail_view`'s tool logic (rate-limit/auth/UUID
+  ordering, RLS-only query shape, handled-failure paths, shared-helper
+  refactor) — appended to `tests/unit/test_ui_templates.py` and
+  `tests/unit/test_mcp_server.py`, matching this feature's established
+  one-file-per-concern convention.
+- Feature: required (new MCP tool surface) — added
+  `tests/feature/test_mcp_get_goal_detail_view.py`, mirroring
+  `test_mcp_get_home_view.py`'s real streamable-HTTP wire-protocol pattern.
+- E2E (Playwright): **not added in this pass**, same rationale as
+  LFC-STORY-003: this view is HTML rendered for an MCP-UI host, not a page or
+  route of this repo's own, and no live MCP-UI host exists in this sandbox to
+  drive a real browser-based `postMessage` round trip against. The rendering
+  logic, including the hostile-input/XSS path, is instead fully covered at
+  the unit layer.
+
+### Unit tests — 27 new, all passing
+
+`tests/unit/test_ui_templates.py` (14 new tests) — `render_goal_detail_view`
+directly, no DB/MCP:
+
+1. `test_render_goal_detail_view_renders_title_description_progress_and_updates`
+   — AC2: title, description, `42%`, an update's content and date all present.
+2. `test_render_goal_detail_view_never_includes_transcript_field_name` — AC2:
+   confirms `transcript` never appears anywhere in rendered output.
+3. `test_render_goal_detail_view_renders_no_updates_yet_for_empty_recent_updates`
+   — AC2 edge case: empty list renders "No updates yet." not a blank section.
+4. `test_render_goal_detail_view_omits_description_block_when_none` — no
+   empty description block rendered when `description is None`.
+5/6. `test_render_goal_detail_view_renders_no_estimate_yet_for_none_progress_not_zero_percent`
+   / `..._renders_zero_percent_distinctly_from_no_estimate` — AC2: confirms
+   `_progress_ring` reuse renders the same "no estimate yet" treatment as the
+   home view, and that `0` is rendered as a real `0%`, never conflated with
+   `None`.
+7/8. `test_render_goal_detail_view_failure_state_has_message_and_no_title_or_updates`
+   / `..._failure_state_takes_precedence_over_content` — AC5: error-state
+   renders the message only, with no title/progress/updates/actions
+   alongside it, and failure takes precedence even when content fields are
+   simultaneously populated on the same data object.
+9. `test_render_goal_detail_view_continue_action_injects_prompt_not_tool_call`
+   — AC3: confirms `lifecoachContinueGoal` calls `lifecoachSendPrompt`, not
+   any tool.
+10. `test_render_goal_detail_view_delete_action_gated_behind_two_stage_confirm`
+    — AC4: confirms the `delete-entry`/`delete-confirm` two-stage markup and
+    that only the confirm button calls
+    `lifecoachSendTool("delete_goal", { goal_id: goalId })`.
+11. `test_render_goal_detail_view_has_no_tab_bar_or_streak_markup` —
+    architecture.md's explicit exclusions, re-verified for this view.
+12-14. The hostile-input re-verification trio (see dedicated section below).
+
+`tests/unit/test_mcp_server.py` (13 new tests appended):
+
+1. `test_get_goal_detail_view_returns_embedded_resource_with_title_description_progress_and_updates`
+   — AC1/AC2: full happy path through the real tool function.
+2. `test_get_goal_detail_view_query_selects_only_content_and_created_at_for_updates`
+   — AC2/Requirement 5: confirms the updates query selects exactly
+   `content, created_at` with a `LIMIT 5`, no `transcript`.
+3. `test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_empty`
+   — AC2 edge case, through the real tool function.
+4. `test_get_goal_detail_view_renders_no_estimate_yet_when_progress_percent_is_null`
+   — AC2, through the real tool function.
+5. `test_get_goal_detail_view_returns_failure_resource_when_goal_row_missing`
+   — AC5: no goal row -> failure-state `EmbeddedResource`, and confirms only
+   one query (the goal lookup) was ever issued — the updates query never
+   runs once the goal row comes back empty.
+6. `test_get_goal_detail_view_returns_failure_resource_on_unhandled_db_error_instead_of_raising`
+   — AC5: an arbitrary `RuntimeError` mid-query is caught and converted to
+   the same failure-state resource, never propagated raw.
+7. `test_get_goal_detail_view_rejects_malformed_goal_id_before_db_call` —
+   AC6: a non-UUID `goal_id` raises `ValueError` with zero DB calls.
+8/9. `test_get_goal_detail_view_enforces_rate_limit_before_jwt_verification`
+   / `..._enforces_jwt_verification_before_db_call` — AC6: call-order tracked
+   via a shared list, and zero DB calls on auth failure.
+10. `test_get_goal_detail_view_jwt_verification_before_uuid_validation_only_matters_after_db_call_check`
+    — AC6 edge case: a malformed `goal_id` combined with a failing auth mock
+    still surfaces the auth failure (not a UUID parse error) with zero DB
+    calls either way — the two checks are independent gates that both must
+    pass before any DB call, not strictly ordered relative to each other.
+11. `test_get_goal_detail_view_query_has_no_app_level_user_id_clause` —
+    Requirement 9: confirms the goal query has no app-level `user_id`
+    predicate.
+12. `test_get_goal_detail_view_tool_description_mentions_goal_detail` —
+    sanity check on the registered tool description.
+13. `test_build_embedded_html_resource_helper_used_by_both_home_and_detail_view_builders`
+    — regression guard on the `_build_embedded_html_resource` refactor:
+    confirms both `_build_home_view_resource` and
+    `_build_goal_detail_view_resource` route through the shared helper by
+    inspecting their source directly, rather than constructing
+    `EmbeddedResource` independently.
+
+### Hostile-input re-verification (explicitly requested, done as a real test, not a code-reading claim)
+
+Built a title containing a double-quote, a single-quote, and a raw
+`<script>` tag: `Evil" Goal' <script>alert(1)</script>`. Rendered it through
+`render_goal_detail_view` and asserted, on the actual rendered string (not on
+an assumption):
+
+- `test_render_goal_detail_view_continue_button_onclick_contains_only_uuid_never_hostile_title_text`
+  — the raw `<script>alert(1)</script>` tag never appears anywhere in the
+  output; the HTML-entity-escaped form does. The continue button's `onclick`
+  attribute value is extracted by string slicing and asserted to be byte-for-byte
+  `lifecoachContinueGoal('{GOAL_ID}')` — the UUID and nothing else; no
+  fragment of `Evil`, no quote character, no `script` substring.
+- `test_render_goal_detail_view_delete_button_onclick_contains_only_uuid_never_hostile_title_text`
+  — both the show-confirm and confirm-delete `onclick` attributes contain
+  only the UUID, confirming the hostile title never reaches the delete path
+  either (expected, since delete never references the title at all).
+- `test_render_goal_detail_view_title_rendered_as_escaped_dom_text_not_inside_any_onclick`
+  — extracts every `onclick="..."` attribute value present anywhere in the
+  full rendered document via a small helper (`_all_onclick_values`) and
+  asserts none of them contain any fragment of the hostile title or the word
+  "script"; separately extracts the title `<p>` element's inner text and
+  confirms it is the HTML-entity-escaped form
+  (`&lt;script&gt;alert(1)&lt;/script&gt;`), proving the title is rendered as
+  escaped markup text content, never as raw markup and never inside any
+  inline-JS attribute.
+
+This is a genuine behavioral test against the actual hostile string, not a
+restatement of the implementation's own assumption — it would fail if a
+future change ever interpolated the title into any onclick string.
+
+### Feature tests — 5 new, all passing
+
+Added `tests/feature/test_mcp_get_goal_detail_view.py`, following
+`test_mcp_get_home_view.py`'s real wire-protocol pattern (fresh `FastMCP`
+instance, `httpx.ASGITransport`, full `initialize` ->
+`notifications/initialized` -> `tools/call` handshake against the real
+`get_goal_detail_view` function and its real registered description):
+
+1. `test_get_goal_detail_view_through_live_mcp_transport_returns_html_resource_with_goal_data`
+   — AC1/AC2: valid JWT + valid goal -> non-error response containing title,
+   description, the update's content, `text/html`, and confirms `transcript`
+   never appears in the wire-level response body.
+2. `test_get_goal_detail_view_through_live_mcp_transport_returns_failure_resource_for_missing_goal`
+   — AC5: missing goal row -> non-error response (not an MCP-level error) with
+   no title and a failure message, through the real wire protocol.
+3. `test_get_goal_detail_view_through_live_mcp_transport_rejects_missing_jwt_before_db_call`
+   — AC6: no `Authorization` header -> `isError:true`, zero DB calls.
+4. `test_get_goal_detail_view_through_live_mcp_transport_rejects_expired_jwt_before_db_call`
+   — AC6: expired JWT -> `isError:true`, zero DB calls.
+5. `test_get_goal_detail_view_through_live_mcp_transport_rejects_malformed_goal_id_before_db_call`
+   — AC6: non-UUID `goal_id` argument, delivered through the real JSON-RPC
+   `tools/call` path -> `isError:true`, zero DB calls.
+
+### `get_home_view` regression check (refactor verification)
+
+`tests/feature/test_mcp_get_home_view.py` and the `get_home_view`-specific
+tests in `tests/unit/test_mcp_server.py` were **not modified** in this pass
+(confirmed via `git diff --stat` showing zero changes to
+`test_mcp_get_home_view.py`) and were re-run as part of every full-suite run
+below — all still pass unmodified, confirming the `_build_embedded_html_resource`
+extraction did not change `get_home_view`'s actual behavior. Additionally
+added `test_build_embedded_html_resource_helper_used_by_both_home_and_detail_view_builders`
+as a permanent regression guard so a future change that reintroduces
+divergent resource-building logic between the two tools is caught
+immediately.
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root twice in a row to
+rule out flakiness:
+
+- Run 1: **187 passed**, 0 failed, 36 warnings (same pre-existing
+  deprecation warnings as before, unrelated to this story).
+- Run 2: **187 passed**, 0 failed, 36 warnings — identical result, no
+  flakiness.
+
+187 = 155 (prior baseline from LFC-STORY-003) + 14 new unit tests
+(`test_ui_templates.py`) + 13 new unit tests appended to
+`test_mcp_server.py` + 5 new feature tests = 187. The full suite run
+confirms this exactly: **187 passed, 0 failed**, across two consecutive
+runs.
+
+### RLS caveat (AC1/AC5, Requirement 5/8/9) — same recurring caveat class
+
+Same caveat class as every other RLS-dependent story in this repo: the
+absence of an app-level `user_id` clause in the goal-row query is confirmed
+by direct inspection of the executed SQL string, and the missing/foreign/
+soft-deleted-goal path (AC5) is exercised with a mocked zero-row result —
+neither proves the `goals_select_own` RLS policy itself actually excludes
+another user's row or a soft-deleted one against a live Postgres/Supabase
+instance. No Docker/local Postgres was available in this sandbox. This must
+be considered an unverified assumption, not a settled fact, until exercised
+against a real instance — identical framing to LFC-STORY-003's equivalent
+caveat for `get_home_view`.
+
+### Totals: 32 new automated tests (14 + 13 unit, 5 feature), 187/187 full
+suite passing across two consecutive runs, 0 failed, no flakiness. All 6
+acceptance criteria are covered by at least one test each, including a
+genuine hostile-input behavioral test for the "continue conversation"
+title-handling approach (re-verified safe: title is rendered as escaped DOM
+text content read back via `textContent`, never interpolated into any
+`onclick` JS string; the delete and continue `onclick` attributes contain
+only the trusted UUID, confirmed against an actual payload containing a
+double-quote, single-quote, and raw `<script>` tag). The `get_home_view`
+refactor regression check confirms the shared `_build_embedded_html_resource`
+helper introduced no behavior change: its existing test files were left
+unmodified and still pass. AC5's RLS-exclusion path is verified only at the
+app/render level (no live Postgres/Supabase instance) — same recurring
+caveat class as every other story in this repo.

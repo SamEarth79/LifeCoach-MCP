@@ -7,7 +7,14 @@ this data, and `tests/feature/test_mcp_get_home_view.py` for the
 wire-protocol layer.
 """
 
-from app.ui_templates import HomeGoalCard, HomeViewData, render_home_view
+from app.ui_templates import (
+    GoalDetailUpdate,
+    GoalDetailViewData,
+    HomeGoalCard,
+    HomeViewData,
+    render_goal_detail_view,
+    render_home_view,
+)
 
 
 def _card(**overrides):
@@ -202,6 +209,231 @@ def test_script_includes_unverified_disclaimer_comments_for_both_postmessage_fun
 
     assert "UNVERIFIED" in tool_fn
     assert "UNVERIFIED" in prompt_fn
+
+
+GOAL_ID = "33333333-3333-3333-3333-333333333333"
+
+
+def _detail_data(**overrides):
+    defaults = dict(
+        id=GOAL_ID,
+        title="Run a 5k",
+        description="Train three times a week",
+        progress_percent=42,
+        recent_updates=[],
+    )
+    defaults.update(overrides)
+    return GoalDetailViewData(**defaults)
+
+
+def test_render_goal_detail_view_renders_title_description_progress_and_updates():
+    update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
+    data = _detail_data(recent_updates=[update])
+
+    html_output = render_goal_detail_view(data)
+
+    assert "Run a 5k" in html_output
+    assert "Train three times a week" in html_output
+    assert "42%" in html_output
+    assert "Ran 3 miles today" in html_output
+    assert "2026-06-15" in html_output
+
+
+def test_render_goal_detail_view_never_includes_transcript_field_name():
+    update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
+    data = _detail_data(recent_updates=[update])
+
+    html_output = render_goal_detail_view(data)
+
+    assert "transcript" not in html_output.lower()
+
+
+def test_render_goal_detail_view_renders_no_updates_yet_for_empty_recent_updates():
+    data = _detail_data(recent_updates=[])
+
+    html_output = render_goal_detail_view(data)
+
+    assert "No updates yet." in html_output
+    assert 'class="update-item"' not in html_output
+
+
+def test_render_goal_detail_view_omits_description_block_when_none():
+    data = _detail_data(description=None)
+
+    html_output = render_goal_detail_view(data)
+    body = html_output.split("<body>")[1]
+
+    assert "detail-description" not in body
+
+
+def test_render_goal_detail_view_renders_no_estimate_yet_for_none_progress_not_zero_percent():
+    data = _detail_data(progress_percent=None)
+
+    html_output = render_goal_detail_view(data)
+    body = html_output.split("<body>")[1]
+
+    assert "0%" not in body
+    assert "no-estimate" in body
+
+
+def test_render_goal_detail_view_renders_zero_percent_distinctly_from_no_estimate():
+    data = _detail_data(progress_percent=0)
+
+    html_output = render_goal_detail_view(data)
+    body = html_output.split("<body>")[1]
+
+    assert "0%" in body
+    assert "no-estimate" not in body
+
+
+def test_render_goal_detail_view_failure_state_has_message_and_no_title_or_updates():
+    update = GoalDetailUpdate(content="should not appear", created_at="2026-06-15T10:00:00+00:00")
+    data = GoalDetailViewData(
+        id=None,
+        title=None,
+        description=None,
+        progress_percent=None,
+        recent_updates=[update],
+        error="This goal isn't available.",
+    )
+
+    html_output = render_goal_detail_view(data)
+    body = html_output.split("<body>")[1]
+
+    assert "This goal isn&#x27;t available." in body or "This goal isn't available." in body
+    assert 'id="goal-title-' not in body
+    assert "should not appear" not in body
+    assert "Continue this conversation" not in body
+    assert "Delete goal" not in body
+
+
+def test_render_goal_detail_view_failure_state_takes_precedence_over_content():
+    data = _detail_data(error="boom")
+
+    html_output = render_goal_detail_view(data)
+    body = html_output.split("<body>")[1]
+
+    assert 'id="goal-title-' not in body
+    assert "boom" in body
+    assert "Run a 5k" not in body
+
+
+def test_render_goal_detail_view_continue_action_injects_prompt_not_tool_call():
+    data = _detail_data()
+
+    html_output = render_goal_detail_view(data)
+
+    assert "lifecoachContinueGoal" in html_output
+    assert "lifecoachSendPrompt" in html_output.split("function lifecoachContinueGoal")[1].split(
+        "function lifecoachShowDeleteConfirm"
+    )[0]
+
+
+def test_render_goal_detail_view_delete_action_gated_behind_two_stage_confirm():
+    data = _detail_data()
+
+    html_output = render_goal_detail_view(data)
+
+    assert 'class="delete-entry"' in html_output
+    assert 'class="delete-confirm hidden"' in html_output
+    assert f"lifecoachConfirmDelete('{GOAL_ID}')" in html_output
+    assert 'lifecoachSendTool("delete_goal", { goal_id: goalId })' in html_output
+
+
+def test_render_goal_detail_view_has_no_tab_bar_or_streak_markup():
+    data = _detail_data()
+
+    html_output = render_goal_detail_view(data)
+    lowered = html_output.lower()
+
+    assert "tab-bar" not in lowered
+    assert "reflect" not in lowered
+    assert "journey" not in lowered
+    assert "total days" not in lowered
+    assert "current streak" not in lowered
+    assert "streak" not in lowered
+
+
+def test_render_goal_detail_view_continue_button_onclick_contains_only_uuid_never_hostile_title_text():
+    # Hostile title with a double-quote, a single-quote, and a raw <script>
+    # tag. The "continue conversation" handler must read the title back
+    # from escaped DOM text content at click-time (never interpolate free
+    # text into the onclick JS string), so the onclick attribute itself
+    # must contain nothing but the trusted UUID.
+    hostile_title = '''Evil" Goal' <script>alert(1)</script>'''
+    data = _detail_data(title=hostile_title)
+
+    html_output = render_goal_detail_view(data)
+
+    assert "<script>alert(1)</script>" not in html_output
+    assert "&lt;script&gt;" in html_output
+
+    onclick_marker = f"onclick=\"lifecoachContinueGoal('{GOAL_ID}')\""
+    assert onclick_marker in html_output
+
+    continue_button_start = html_output.index('class="continue-entry"')
+    continue_button_end = html_output.index("</button>", continue_button_start)
+    continue_button_markup = html_output[continue_button_start:continue_button_end]
+
+    assert "onclick" in continue_button_markup
+    onclick_start = continue_button_markup.index('onclick="') + len('onclick="')
+    onclick_end = continue_button_markup.index('"', onclick_start)
+    onclick_value = continue_button_markup[onclick_start:onclick_end]
+
+    assert onclick_value == f"lifecoachContinueGoal('{GOAL_ID}')"
+    assert "Evil" not in onclick_value
+    assert "script" not in onclick_value.lower()
+    assert "'" not in onclick_value.replace(f"'{GOAL_ID}'", "")
+
+
+def test_render_goal_detail_view_delete_button_onclick_contains_only_uuid_never_hostile_title_text():
+    hostile_title = '''Evil" Goal' <script>alert(1)</script>'''
+    data = _detail_data(title=hostile_title)
+
+    html_output = render_goal_detail_view(data)
+
+    delete_show_marker = f"onclick=\"lifecoachShowDeleteConfirm('{GOAL_ID}')\""
+    confirm_marker = f"onclick=\"lifecoachConfirmDelete('{GOAL_ID}')\""
+    assert delete_show_marker in html_output
+    assert confirm_marker in html_output
+    assert "Evil" not in delete_show_marker
+    assert "Evil" not in confirm_marker
+
+
+def test_render_goal_detail_view_title_rendered_as_escaped_dom_text_not_inside_any_onclick():
+    hostile_title = '''Evil" Goal' <script>alert(1)</script>'''
+    data = _detail_data(title=hostile_title)
+
+    html_output = render_goal_detail_view(data)
+
+    title_node_marker = f'id="goal-title-{GOAL_ID}"'
+    assert title_node_marker in html_output
+    title_start = html_output.index(title_node_marker)
+    title_tag_end = html_output.index(">", title_start) + 1
+    title_close = html_output.index("</p>", title_tag_end)
+    title_text_content = html_output[title_tag_end:title_close]
+
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in title_text_content
+    assert "<script>" not in title_text_content
+
+    for onclick_value in _all_onclick_values(html_output):
+        assert "Evil" not in onclick_value
+        assert "script" not in onclick_value.lower()
+
+
+def _all_onclick_values(html_output: str) -> list[str]:
+    values = []
+    marker = 'onclick="'
+    start = 0
+    while True:
+        idx = html_output.find(marker, start)
+        if idx == -1:
+            break
+        value_start = idx + len(marker)
+        value_end = html_output.index('"', value_start)
+        values.append(html_output[value_start:value_end])
+        start = value_end + 1
+    return values
 
 
 def test_html_escape_neutralizes_single_quote_in_interpolated_id():

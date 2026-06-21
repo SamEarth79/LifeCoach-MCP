@@ -20,6 +20,52 @@ class HomeGoalCard:
 
 
 @dataclass
+class GoalDetailUpdate:
+    """One recent update shown on the goal-detail view.
+
+    `content` only — never `transcript`, consistent with `list_updates`.
+    """
+
+    content: str
+    created_at: str
+
+
+@dataclass
+class GoalDetailViewData:
+    """Data contract for `render_goal_detail_view`.
+
+    `id` and `title` identify the goal the detail view is for; `title` is
+    also used to build the "continue this conversation" chat-message
+    injection, so it must be the raw (un-escaped) title — escape at render
+    time, not here.
+
+    `description` is `None` when the goal has no description set — render
+    no description block at all rather than an empty one.
+
+    `progress_percent` follows the same contract as `HomeGoalCard`: `None`
+    means "no estimate yet," distinct from `0`.
+
+    `recent_updates` is the goal's most recent updates (already limited and
+    ordered newest-first by the caller), one `GoalDetailUpdate` per update.
+    An empty list is a normal, valid state (zero updates yet) and must
+    render an explicit "no updates yet" treatment, not a blank section.
+
+    `error` is `None` on a normal render. When set (e.g. the goal doesn't
+    exist, isn't owned by the caller, or is soft-deleted), it carries a
+    short, user-safe description of that handled failure, and the renderer
+    must produce a failure-state UI instead of attempting to render
+    title/description/progress/updates — never both at once.
+    """
+
+    id: str | None
+    title: str | None
+    description: str | None
+    progress_percent: int | None
+    recent_updates: list[GoalDetailUpdate]
+    error: str | None = None
+
+
+@dataclass
 class HomeViewData:
     """Data contract for `render_home_view`.
 
@@ -365,3 +411,274 @@ def _render_failure_state(error: str) -> str:
 {_CREATE_GOAL_ENTRY}
 {_TALK_ENTRY}
 </div>"""
+
+
+def render_goal_detail_view(data: GoalDetailViewData) -> str:
+    """Render the goal-detail view as a complete standalone HTML document.
+
+    Consumes a `GoalDetailViewData` and must produce:
+    - A failure-state variant when `data.error` is set: a clear,
+      non-technical message (e.g. "This goal isn't available.") and no
+      title/description/progress/updates/actions — mirror the structure
+      of `_render_failure_state` above, adapted for this view (no
+      "create a new goal"/"just want to talk" entries here; those are
+      home-view-specific).
+    - Otherwise, the full `data.title` and `data.description` (HTML-escape
+      both — this is free-text user input, never trust it as safe markup;
+      omit the description block entirely when `data.description` is
+      `None`, rather than rendering an empty one).
+    - A progress indicator reusing the existing `_progress_ring(...)`
+      helper from this module rather than re-implementing the ring/"no
+      estimate yet" treatment a second time — this is the second real call
+      site for that helper, which is exactly the case that justifies
+      reusing it instead of duplicating its logic.
+    - A short recent-updates list from `data.recent_updates`, each item
+      showing `content` and `created_at` (date only, same truncation style
+      as `_updated_line` above) — never anything beyond those two fields.
+      When `data.recent_updates` is empty, render an explicit "no updates
+      yet" message instead of an empty list.
+    - A "continue this conversation" action that calls
+      `lifecoachSendPrompt(...)` (not `lifecoachSendTool`) with a prompt
+      that references the goal by `data.title`, e.g. something like
+      "Let's continue talking about {title}." — this must inject a chat
+      message, not invoke any tool.
+    - A delete action gated behind an explicit confirm step (e.g. a
+      two-stage button: first click reveals an inline "Are you sure?"
+      confirmation, second click on the confirm button actually proceeds).
+      Only the confirmed action calls
+      `lifecoachSendTool('delete_goal', { goal_id: data.id })`. Note:
+      `delete_goal` does not exist yet as of this story — it ships as a
+      sibling story in this same feature — but the click handler should
+      still be wired to call it now, since by the time this view ships
+      end-to-end the tool will exist.
+
+    TODO(frontend): replace this placeholder body with the real HTML/CSS.
+    """
+    if data.error:
+        body = _render_detail_failure_state(data.error)
+    else:
+        body = _render_detail_content(data)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>{_DETAIL_STYLE}{_STYLE}</style>
+</head>
+<body>
+<div class="page">
+{body}
+</div>
+<script>{_DETAIL_SCRIPT}{_SCRIPT}</script>
+</body>
+</html>"""
+
+
+_DETAIL_STYLE = """
+.detail-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: #2e2a25;
+}
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.detail-description {
+  font-size: 14px;
+  line-height: 1.5;
+  color: #5c5346;
+  margin: 0 0 24px;
+  white-space: pre-wrap;
+}
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a59a8c;
+  margin: 0 0 10px;
+}
+.update-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+.update-item {
+  background: #ffffff;
+  border: 1px solid #efe9e1;
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+.update-content {
+  font-size: 13px;
+  color: #3a352f;
+  margin: 0 0 4px;
+  white-space: pre-wrap;
+}
+.update-date {
+  font-size: 11px;
+  color: #a59a8c;
+}
+.no-updates {
+  font-size: 13px;
+  color: #9a9082;
+  margin: 0 0 24px;
+}
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.continue-entry {
+  border: none;
+  border-radius: 16px;
+  padding: 14px 18px;
+  background: #ece4d8;
+  font-size: 14px;
+  font-weight: 500;
+  color: #5c5346;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+.continue-entry:hover {
+  background: #e4dac9;
+}
+.delete-entry {
+  border: 1.5px dashed #cbbfae;
+  border-radius: 16px;
+  padding: 14px 18px;
+  background: transparent;
+  font-size: 14px;
+  font-weight: 500;
+  color: #9a5a45;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+.delete-entry:hover {
+  background: #fbf2ee;
+}
+.delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 16px;
+  padding: 14px 18px;
+  background: #f6ece6;
+}
+.delete-confirm-text {
+  flex: 1;
+  font-size: 13px;
+  color: #8a5a3c;
+}
+.delete-confirm-btn {
+  border: none;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.delete-confirm-btn.confirm {
+  background: #b2543a;
+  color: #fff;
+}
+.delete-confirm-btn.cancel {
+  background: #eee2da;
+  color: #6b6258;
+}
+.hidden {
+  display: none;
+}
+"""
+
+_DETAIL_SCRIPT = """
+function lifecoachContinueGoal(goalId) {
+  var el = document.getElementById("goal-title-" + goalId);
+  var title = el ? el.textContent : "this goal";
+  lifecoachSendPrompt("Let's continue talking about " + title + ".");
+}
+
+function lifecoachShowDeleteConfirm(goalId) {
+  document.getElementById("delete-entry-" + goalId).classList.add("hidden");
+  document.getElementById("delete-confirm-" + goalId).classList.remove("hidden");
+}
+
+function lifecoachCancelDeleteConfirm(goalId) {
+  document.getElementById("delete-confirm-" + goalId).classList.add("hidden");
+  document.getElementById("delete-entry-" + goalId).classList.remove("hidden");
+}
+
+function lifecoachConfirmDelete(goalId) {
+  lifecoachSendTool("delete_goal", { goal_id: goalId });
+}
+"""
+
+
+def _detail_updated_line(created_at: str) -> str:
+    date_only = created_at.split("T", 1)[0]
+    return html.escape(date_only)
+
+
+def _detail_update_item(update: GoalDetailUpdate) -> str:
+    safe_content = html.escape(update.content)
+    safe_date = _detail_updated_line(update.created_at)
+    return f"""<div class="update-item">
+  <p class="update-content">{safe_content}</p>
+  <span class="update-date">{safe_date}</span>
+</div>"""
+
+
+def _render_recent_updates(updates: list[GoalDetailUpdate]) -> str:
+    if not updates:
+        return '<p class="no-updates">No updates yet.</p>'
+    items = "\n".join(_detail_update_item(update) for update in updates)
+    return f'<div class="update-list">\n{items}\n</div>'
+
+
+def _render_detail_content(data: GoalDetailViewData) -> str:
+    safe_id = html.escape(data.id or "")
+    safe_title = html.escape(data.title or "")
+    description_block = ""
+    if data.description:
+        description_block = f'<p class="detail-description">{html.escape(data.description)}</p>'
+
+    return f"""<div class="detail-header">
+  {_progress_ring(data.progress_percent)}
+  <p class="detail-title" id="goal-title-{safe_id}">{safe_title}</p>
+</div>
+{description_block}
+<p class="section-label">Recent updates</p>
+{_render_recent_updates(data.recent_updates)}
+<div class="action-list">
+  <button class="continue-entry" type="button"
+    onclick="lifecoachContinueGoal('{safe_id}')">
+    Continue this conversation
+  </button>
+  <button class="delete-entry" type="button" id="delete-entry-{safe_id}"
+    onclick="lifecoachShowDeleteConfirm('{safe_id}')">
+    Delete goal
+  </button>
+  <div class="delete-confirm hidden" id="delete-confirm-{safe_id}">
+    <span class="delete-confirm-text">Are you sure?</span>
+    <button class="delete-confirm-btn confirm" type="button"
+      onclick="lifecoachConfirmDelete('{safe_id}')">Confirm</button>
+    <button class="delete-confirm-btn cancel" type="button"
+      onclick="lifecoachCancelDeleteConfirm('{safe_id}')">Cancel</button>
+  </div>
+</div>"""
+
+
+def _render_detail_failure_state(error: str) -> str:
+    safe_error = html.escape(error)
+    return f'<div class="failure-state"><p class="failure-message">{safe_error}</p></div>'
