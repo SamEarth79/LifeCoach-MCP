@@ -7,6 +7,23 @@ All notable changes to this project are documented in this file, following
 
 ### Added
 
+- Updates (LFC-003): a goal-linked record of what an AI coach and a user
+  agreed on during a coaching conversation, exposed via two MCP
+  (Model Context Protocol) tools rather than REST — the first feature with
+  no REST surface. `updates` table with Row Level Security restricting
+  access to the requester's own rows and enforcing that any new update's
+  goal is owned by the requester and not soft-deleted. Updates are
+  append-only — no edit/delete capability.
+- `record_update` MCP tool — stores a new update against one of the
+  caller's own active goals: a required short `content` summary and an
+  optional full `transcript`.
+- `list_updates` MCP tool — retrieves a goal's past updates (`content`,
+  `source`, `created_at`); never returns `transcript`, so re-injecting
+  update history as conversational context stays cheap regardless of how
+  many updates accumulate.
+- MCP tool calls require the same Supabase JWT verification and per-IP rate
+  limiting already enforced on REST endpoints, mounted onto the existing
+  FastAPI app in the same process.
 - Goals (LFC-002): freeform goals for the authenticated user — create, list,
   edit, and soft-delete. `goals` table with Row Level Security restricting
   access to each user's own, non-deleted goals; deleting a goal sets a

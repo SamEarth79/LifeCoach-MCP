@@ -105,6 +105,69 @@ schema changes outside of Alembic.
   read only from environment variables; `.env` is gitignored, and
   `.env.example` documents the required variables with placeholder values.
 
+### Protocol surface: MCP tools, mounted in-process alongside REST
+
+Starting with `updates` (LFC-003), the backend exposes a second protocol
+surface beyond REST: MCP (Model Context Protocol) tools, callable by an
+LLM-based MCP client rather than a conventional HTTP client. This is the
+first feature with no REST endpoints at all — `record_update` and
+`list_updates` (defined in `app/mcp_server.py`) exist only as MCP tools.
+
+This is a same-process mount, not a separate service:
+
+```
+            ┌───────────────┐
+   Client → │   FastAPI     │ → Postgres (Supabase-hosted)
+  (REST)    │   backend     │
+            └──────┬────────┘
+                    │ app.mount("/", mcp_asgi_app)
+                    │ (registered after all REST routes)
+                    ▼
+            ┌───────────────┐
+  MCP client│  FastMCP app  │ → same Postgres pool, same auth, same
+ (LLM tool  │ (app/mcp_     │    rate limiter as REST
+   calls) → │  server.py)   │
+            └───────────────┘
+```
+
+- **Mounting**: `app/main.py` builds the MCP ASGI app
+  (`mcp.streamable_http_app()`) and mounts it via `app.mount("/", ...)`
+  strictly after every REST route is already declared, so Starlette's
+  registration-order route matching cannot let the mount shadow an existing
+  REST route. `app.router.lifespan_context` is then reassigned to the
+  mounted app's lifespan context, which is required for the MCP SDK's
+  session manager to actually start up — not just a convenience wrapper.
+- **Auth is reused, not reimplemented.** MCP tool handlers aren't FastAPI
+  routes, so they have no access to `Depends(get_current_user)`. Instead,
+  `app/auth.py` exposes `verify_bearer_token(authorization_header: str | None)`
+  — the same JWKS/ES256 verification logic as `get_current_user`, callable
+  from a raw header string. Each tool handler pulls the real `Authorization`
+  header off the live request via the MCP SDK's `Context` object
+  (`ctx.request_context.request`), confirmed against the installed SDK's
+  source rather than assumed — this repo has previously shipped a real bug
+  (see `JWT-VERIFICATION-INCIDENT.md`) from assuming a third-party
+  integration's auth mechanism instead of verifying it.
+- **Rate limiting is reused, not reimplemented.** `app/rate_limit.py`
+  (logic extracted from `app/main.py` during this feature, not rewritten)
+  exposes `enforce_mcp_rate_limit`, which calls the same underlying
+  `limits`-package limiter REST routes use, keyed by the same per-IP
+  resolution (`get_client_ip`). MCP and REST traffic from the same client IP
+  share one rate-limit budget.
+- **New third-party dependency**: the official MCP Python SDK (`mcp`,
+  providing `mcp.server.fastmcp.FastMCP`) — the first dependency in this
+  repo beyond FastAPI/Supabase tooling that defines its own protocol-level
+  request lifecycle (sessions, its own exception-to-tool-result translation,
+  its own transport security middleware) rather than just being a library
+  called from within FastAPI's request/response cycle.
+- **Known deployment risk, not yet resolved**: the MCP SDK's
+  `TransportSecurityMiddleware` defaults `allowed_hosts` to `[]` with
+  DNS-rebinding protection enabled, which would reject every MCP request
+  behind a real reverse proxy with a 421 until `allowed_hosts` is
+  explicitly configured for the deployed hostname. Tracked in
+  `knowledge/documentation/LFC-003-updates/technical-doc.md` and in this
+  feature's test results — must be addressed before production deployment
+  behind a reverse proxy.
+
 ### Soft delete as an RLS-enforced pattern
 
 The `goals` table (added in LFC-002) is the first user-owned table beyond
