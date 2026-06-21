@@ -40,7 +40,7 @@ class McpRateLimitExceeded(Exception):
     """Raised when an MCP tool call exceeds the per-IP rate limit."""
 
 
-async def enforce_mcp_rate_limit(request: Request | None, user_id: str) -> None:
+async def enforce_mcp_rate_limit(request: Request | None, user_id: str | None = None) -> None:
     """Rate-limit an MCP tool call, keyed by client IP, same window as REST.
 
     MCP tool handlers aren't FastAPI routes, so they can't use
@@ -52,10 +52,21 @@ async def enforce_mcp_rate_limit(request: Request | None, user_id: str) -> None:
     against the same per-IP rate limit item the REST endpoints use, keyed
     by the same client-IP resolution.
 
-    Falls back to keying on `user_id` if no real HTTP request is available
-    (should not happen in production, since the MCP SDK only invokes tools
-    with a live request attached) rather than silently skipping the limit.
+    Called before JWT verification (matching the REST pattern's
+    cheap-checks-first ordering, where `enforce_rate_limit` is declared
+    ahead of `get_current_user`), so `user_id` is not yet known in the
+    normal case and is keyed by IP instead. Falls back to keying on
+    `user_id` only if no real HTTP request is available (should not
+    happen in production, since the MCP SDK only invokes tools with a
+    live request attached); if neither is available, fails loudly rather
+    than silently skipping the limit.
     """
-    key = get_client_ip(request) if request is not None else user_id
+    if request is not None:
+        key = get_client_ip(request)
+    elif user_id is not None:
+        key = user_id
+    else:
+        raise McpRateLimitExceeded("Rate limit cannot be enforced: no request or user id")
+
     if not limiter.limiter.hit(_mcp_rate_limit_item, key):
         raise McpRateLimitExceeded(f"Rate limit exceeded: {per_ip_rate_limit}")

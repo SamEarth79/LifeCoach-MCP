@@ -204,5 +204,5 @@ async def delete_goal(
 
 
 mcp_asgi_app = mcp.streamable_http_app()
-app.mount("/", mcp_asgi_app)
+app.mount("/mcp", mcp_asgi_app)
 app.router.lifespan_context = mcp_asgi_app.router.lifespan_context

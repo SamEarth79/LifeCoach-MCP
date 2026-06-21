@@ -97,18 +97,8 @@ async def verify_bearer_token(authorization_header: str | None) -> CurrentUser:
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> CurrentUser:
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        logger.warning("JWT verification failed: missing or malformed Authorization header")
+    if credentials is None:
+        logger.warning("JWT verification failed: missing Authorization header")
         raise _unauthorized()
 
-    payload = _decode_token(credentials.credentials)
-
-    user_id = payload.get("sub")
-    email = payload.get("email")
-    if not user_id or not email:
-        logger.warning("JWT verification failed: missing sub or email claim")
-        raise _unauthorized()
-
-    await _ensure_user_row_exists(user_id, email)
-
-    return CurrentUser(id=user_id, email=email)
+    return await verify_bearer_token(f"{credentials.scheme} {credentials.credentials}")

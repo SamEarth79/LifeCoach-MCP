@@ -290,7 +290,7 @@ async def test_list_updates_enforces_rate_limit_before_db_call(monkeypatch):
     await mcp_server.list_updates(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
     rate_limit_mock.assert_awaited_once()
-    assert rate_limit_mock.await_args.args[1] == USER_ID
+    assert rate_limit_mock.await_args.args[0] is not None
 
 
 def test_list_updates_tool_description_promises_no_transcript():

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-mcp = FastMCP("lifecoach")
+mcp = FastMCP("lifecoach", streamable_http_path="/")
 
 
 @mcp.tool(
@@ -35,10 +35,10 @@ async def record_update(
     transcript: str | None = None,
 ) -> dict:
     request = ctx.request_context.request
-    authorization_header = request.headers.get("authorization") if request is not None else None
+    await enforce_mcp_rate_limit(request)
 
+    authorization_header = request.headers.get("authorization") if request is not None else None
     current_user = await verify_bearer_token(authorization_header)
-    await enforce_mcp_rate_limit(request, current_user.id)
 
     try:
         update = UpdateCreate(goal_id=goal_id, content=content, transcript=transcript)
@@ -84,10 +84,10 @@ async def record_update(
 )
 async def list_updates(goal_id: str, ctx: Context) -> list[dict]:
     request = ctx.request_context.request
-    authorization_header = request.headers.get("authorization") if request is not None else None
+    await enforce_mcp_rate_limit(request)
 
+    authorization_header = request.headers.get("authorization") if request is not None else None
     current_user = await verify_bearer_token(authorization_header)
-    await enforce_mcp_rate_limit(request, current_user.id)
 
     try:
         validated_goal_id = UUID(goal_id)
