@@ -307,3 +307,381 @@ def test_render_login_or_consent_shows_loading_state_when_session_already_active
     )[1]
     assert "lifecoachRenderLoadingState();" in session_branch
     assert "lifecoachRenderLoginForm" not in session_branch
+
+
+def _extract_function_body(html_output: str, function_start_signature: str, next_function_signature: str) -> str:
+    start = html_output.index(function_start_signature)
+    end = html_output.index(next_function_signature, start)
+    return html_output[start:end]
+
+
+def test_render_login_or_consent_calls_get_authorization_details_when_session_active():
+    """AC1: an active session fetches authorization details via the SDK."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    render_login_or_consent_body = _extract_function_body(
+        html_output, "async function renderLoginOrConsent", "function lifecoachInit"
+    )
+    session_branch = render_login_or_consent_body.split("if (!data.session)")[1].split(
+        "return;"
+    )[1]
+
+    assert "client.auth.oauth.getAuthorizationDetails(" in session_branch
+    assert "authorizationId" in session_branch.split("getAuthorizationDetails(")[1].split(")")[0]
+
+
+def test_render_login_or_consent_routes_to_consent_screen_on_successful_details_fetch():
+    """AC1: a successful fetch renders the consent screen with the fetched details."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    render_login_or_consent_body = _extract_function_body(
+        html_output, "async function renderLoginOrConsent", "function lifecoachInit"
+    )
+
+    assert "lifecoachRenderConsentScreen(client, authorizationId, details)" in render_login_or_consent_body
+
+
+def test_render_login_or_consent_routes_to_failure_state_when_details_fetch_errors():
+    """AC5: an error/missing-details response renders the SAME failure-state helper
+    used for the missing-authorization_id case, not a new parallel implementation."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    render_login_or_consent_body = _extract_function_body(
+        html_output, "async function renderLoginOrConsent", "function lifecoachInit"
+    )
+
+    assert "if (error || !details)" in render_login_or_consent_body
+    error_branch = render_login_or_consent_body.split("if (error || !details)")[1].split(
+        "return;"
+    )[0]
+    assert "lifecoachRenderFailureState(" in error_branch
+    assert "invalid or has expired" in error_branch
+
+
+def test_render_login_or_consent_routes_to_failure_state_when_get_authorization_details_throws():
+    """AC5: a thrown exception (network error, SDK throw) is also caught and routed
+    to the same failure-state helper, not left to crash the page."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    render_login_or_consent_body = _extract_function_body(
+        html_output, "async function renderLoginOrConsent", "function lifecoachInit"
+    )
+
+    assert "try {" in render_login_or_consent_body
+    assert "catch (caughtError)" in render_login_or_consent_body
+    catch_branch = render_login_or_consent_body.split("catch (caughtError)")[1]
+    assert "lifecoachRenderFailureState(" in catch_branch
+    assert "invalid or has expired" in catch_branch
+
+
+def test_failure_state_helper_used_for_authorization_details_error_is_the_same_function_as_missing_id_case():
+    """AC5: confirms reuse, not drift — the literal failure message used for both
+    the getAuthorizationDetails error branch and its catch block is byte-identical
+    to the one used for the missing-authorization_id case, and all three call
+    sites invoke the single shared helper function rather than a new parallel one."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    failure_message = "This link is invalid or has expired. Please try connecting again from the app."
+    # Three call sites share this exact literal message: the missing-authorization_id
+    # branch (lifecoachInit), the getAuthorizationDetails error branch, and its
+    # catch block (both in renderLoginOrConsent) -- all invoking the one shared helper.
+    assert html_output.count(failure_message) == 3
+    assert html_output.count("lifecoachRenderFailureState(\n") == 3
+    assert html_output.count("function lifecoachRenderFailureState(") == 1
+
+
+def test_render_consent_screen_renders_client_name_and_scopes():
+    """AC1: client.name and each space-separated scope are rendered."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    consent_screen_body = _extract_function_body(
+        html_output,
+        "function lifecoachRenderConsentScreen",
+        "async function lifecoachHandleConsentDecision",
+    )
+
+    assert "details.client.name" in consent_screen_body
+    assert 'details.scope.split(" ")' in consent_screen_body
+    assert "scope-item" in consent_screen_body
+    assert "scope-list" in consent_screen_body
+
+
+def test_render_consent_screen_escapes_client_name_with_html_escape_helper_not_js_string_escape():
+    """AC2 (security-critical): client.name must go through lifecoachEscapeHtml,
+    not _escape_js_string (wrong context for an innerHTML sink)."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    consent_screen_body = _extract_function_body(
+        html_output,
+        "function lifecoachRenderConsentScreen",
+        "async function lifecoachHandleConsentDecision",
+    )
+
+    assert "lifecoachEscapeHtml(details.client.name)" in consent_screen_body
+
+
+def test_render_consent_screen_escapes_every_scope_with_html_escape_helper():
+    """AC2 (security-critical): each scope token is individually run through
+    lifecoachEscapeHtml inside the .map() callback before being concatenated."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    consent_screen_body = _extract_function_body(
+        html_output,
+        "function lifecoachRenderConsentScreen",
+        "async function lifecoachHandleConsentDecision",
+    )
+
+    map_callback = consent_screen_body.split(".map(function (scope)")[1].split("})")[0]
+    assert "lifecoachEscapeHtml(scope)" in map_callback
+
+
+def test_consent_screen_client_name_and_scopes_never_inserted_into_innerhtml_unescaped():
+    """AC2: the only client-controlled values placed into the innerHTML-bound
+    string are the already-escaped safeClientName/scopeItems variables -- the
+    raw details.client.name / raw scope strings are never concatenated directly."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    consent_screen_body = _extract_function_body(
+        html_output,
+        "function lifecoachRenderConsentScreen",
+        "async function lifecoachHandleConsentDecision",
+    )
+
+    innerhtml_assignment = consent_screen_body.split(".innerHTML =")[1].split(
+        "document\n    .getElementById"
+    )[0]
+
+    assert "details.client.name" not in innerhtml_assignment
+    assert "safeClientName" in innerhtml_assignment
+    assert "scopeItems" in innerhtml_assignment
+
+
+def test_lifecoach_escape_html_function_escapes_all_five_html_metacharacters():
+    """Direct structural check that lifecoachEscapeHtml escapes &, <, >, ", ' --
+    matching the behavior any HTML-escaping helper must provide."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    escape_html_body = _extract_function_body(
+        html_output,
+        "function lifecoachEscapeHtml",
+        "function lifecoachRenderConsentScreen",
+    )
+
+    assert "/&/g" in escape_html_body
+    assert "&amp;" in escape_html_body
+    assert "/</g" in escape_html_body
+    assert "&lt;" in escape_html_body
+    assert "/>/g" in escape_html_body
+    assert "&gt;" in escape_html_body
+    assert '/"/g' in escape_html_body
+    assert "&quot;" in escape_html_body
+    assert "/'/g" in escape_html_body
+    assert "&#39;" in escape_html_body
+
+
+def _simulate_lifecoach_escape_html(value: str) -> str:
+    """Pure-Python re-implementation mirroring the embedded JS lifecoachEscapeHtml
+    function exactly, to assert behavior against constructed hostile payloads --
+    the same approach used for _escape_js_string's hostile-payload tests above."""
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+def test_lifecoach_escape_html_neutralizes_img_onerror_xss_payload_in_client_name_position():
+    """AC2 (security-critical): a hostile client.name containing an <img onerror>
+    XSS payload must have its angle brackets and quotes neutralized."""
+    hostile_client_name = '<img src=x onerror=alert(1)>'
+
+    escaped = _simulate_lifecoach_escape_html(hostile_client_name)
+
+    assert "<img" not in escaped
+    assert "<" not in escaped
+    assert ">" not in escaped
+    assert "&lt;img src=x onerror=alert(1)&gt;" == escaped
+
+
+def test_lifecoach_escape_html_neutralizes_attribute_breakout_payload_in_scope_position():
+    """AC2 (security-critical): a hostile scope value containing a double-quote
+    that could break out of an HTML attribute context must be escaped."""
+    hostile_scope = 'read"><script>alert(document.cookie)</script>'
+
+    escaped = _simulate_lifecoach_escape_html(hostile_scope)
+
+    assert '"' not in escaped
+    assert "<" not in escaped
+    assert ">" not in escaped
+    assert "&quot;" in escaped
+    assert "&lt;script&gt;" in escaped
+
+
+def test_lifecoach_escape_html_neutralizes_single_quote_breakout_payload():
+    """AC2: a hostile value using single quotes to break out of an attribute
+    context is also neutralized, distinct from the double-quote case."""
+    hostile_value = "x' onmouseover='alert(1)"
+
+    escaped = _simulate_lifecoach_escape_html(hostile_value)
+
+    assert "'" not in escaped
+    assert "&#39;" in escaped
+
+
+def test_lifecoach_escape_html_is_distinct_from_escape_js_string():
+    """Confirms lifecoachEscapeHtml (HTML-entity escaping) and _escape_js_string
+    (JS-string-literal escaping) are two different functions with different
+    escaping rules -- using the wrong one for an innerHTML sink would be unsafe."""
+    hostile_value = '<script>alert(1)</script>'
+
+    html_escaped = _simulate_lifecoach_escape_html(hostile_value)
+    js_escaped = _escape_js_string(hostile_value)
+
+    assert html_escaped != js_escaped
+    assert "&lt;script&gt;" in html_escaped
+    assert "<\\/script>" in js_escaped
+    assert "&lt;" not in js_escaped
+
+
+def test_consent_screen_renders_approve_and_deny_buttons_wired_to_handler():
+    """AC3/AC4: Approve and Deny buttons exist and are wired to
+    lifecoachHandleConsentDecision with the correct decision string."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    consent_screen_body = _extract_function_body(
+        html_output,
+        "function lifecoachRenderConsentScreen",
+        "async function lifecoachHandleConsentDecision",
+    )
+
+    assert 'id="oauth-consent-approve"' in consent_screen_body
+    assert 'id="oauth-consent-deny"' in consent_screen_body
+    assert "Approve" in consent_screen_body
+    assert "Deny" in consent_screen_body
+
+    approve_listener = consent_screen_body.split('getElementById("oauth-consent-approve")')[1].split(
+        "});"
+    )[0]
+    assert 'lifecoachHandleConsentDecision(client, authorizationId, "approve")' in approve_listener
+
+    deny_listener = consent_screen_body.split('getElementById("oauth-consent-deny")')[1].split(
+        "});"
+    )[0]
+    assert 'lifecoachHandleConsentDecision(client, authorizationId, "deny")' in deny_listener
+
+
+def test_handle_consent_decision_calls_approve_authorization_on_approve():
+    """AC3: clicking Approve calls approveAuthorization(authorizationId)."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    handler_body = _extract_function_body(
+        html_output,
+        "async function lifecoachHandleConsentDecision",
+        "function lifecoachRenderLoginForm",
+    )
+
+    approve_branch = handler_body.split('decision === "approve"')[1].split(":")[0]
+    assert "client.auth.oauth.approveAuthorization(authorizationId)" in approve_branch
+
+
+def test_handle_consent_decision_calls_deny_authorization_on_deny():
+    """AC4: clicking Deny calls denyAuthorization(authorizationId)."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    handler_body = _extract_function_body(
+        html_output,
+        "async function lifecoachHandleConsentDecision",
+        "function lifecoachRenderLoginForm",
+    )
+
+    deny_branch = handler_body.split('decision === "approve"')[1].split(":")[1].split(";")[0]
+    assert "client.auth.oauth.denyAuthorization(authorizationId)" in deny_branch
+
+
+def test_handle_consent_decision_navigates_to_redirect_url_on_success():
+    """AC3/AC4: on success, the browser navigates via window.location.href to
+    the returned redirect_url, for both approve and deny (shared code path)."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    handler_body = _extract_function_body(
+        html_output,
+        "async function lifecoachHandleConsentDecision",
+        "function lifecoachRenderLoginForm",
+    )
+
+    assert "window.location.href = data.redirect_url;" in handler_body
+
+
+def test_handle_consent_decision_shows_retryable_error_on_missing_redirect_url():
+    """Edge case: error or missing data/redirect_url shows an error message
+    without navigating, and does not remove or disable the buttons."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    handler_body = _extract_function_body(
+        html_output,
+        "async function lifecoachHandleConsentDecision",
+        "function lifecoachRenderLoginForm",
+    )
+
+    assert "if (error || !data || !data.redirect_url)" in handler_body
+    error_branch = handler_body.split("if (error || !data || !data.redirect_url)")[1].split(
+        "return;"
+    )[0]
+
+    assert "errorEl.textContent" in error_branch
+    assert "errorEl.hidden = false;" in error_branch
+    assert "window.location" not in error_branch
+    assert ".remove(" not in error_branch
+    assert ".disabled" not in error_branch
+    assert ".innerHTML" not in error_branch
+
+
+def test_handle_consent_decision_shows_retryable_error_when_sdk_call_throws():
+    """Edge case: a thrown exception (e.g. network failure) is caught and shows
+    the same retryable error message, not an unhandled rejection."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    handler_body = _extract_function_body(
+        html_output,
+        "async function lifecoachHandleConsentDecision",
+        "function lifecoachRenderLoginForm",
+    )
+
+    assert "try {" in handler_body
+    assert "catch (caughtError)" in handler_body
+    catch_branch = handler_body.split("catch (caughtError)")[1]
+    assert "errorEl.textContent" in catch_branch
+    assert "errorEl.hidden = false;" in catch_branch
+    assert "window.location" not in catch_branch
+
+
+def test_handle_consent_decision_clears_previous_error_state_at_start_of_each_attempt():
+    """Retry behavior: a fresh attempt hides any previously shown error before
+    making the SDK call, so a retry after a transient failure isn't stuck
+    displaying the old error message indefinitely."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    handler_body = _extract_function_body(
+        html_output,
+        "async function lifecoachHandleConsentDecision",
+        "function lifecoachRenderLoginForm",
+    )
+
+    pre_try_section = handler_body.split("try {")[0]
+    assert 'getElementById("oauth-consent-action-error")' in pre_try_section
+    assert "errorEl.hidden = true;" in pre_try_section
+
+
+def test_consent_action_error_element_starts_hidden_in_rendered_markup():
+    """The error placeholder is hidden by default until an actual failure occurs."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    consent_screen_body = _extract_function_body(
+        html_output,
+        "function lifecoachRenderConsentScreen",
+        "async function lifecoachHandleConsentDecision",
+    )
+
+    assert 'id="oauth-consent-action-error" hidden' in consent_screen_body

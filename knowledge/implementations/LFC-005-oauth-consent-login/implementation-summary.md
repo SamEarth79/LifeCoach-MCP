@@ -142,3 +142,108 @@ LFC-STORY-005-001). No feature or E2E tests were added — see
 security-review detail on the no-enumeration error handling, and the
 explicitly flagged unverified `signInWithPassword` wire-contract assumption
 (`PASS WITH CAVEATS`).
+
+## LFC-STORY-005-003: Consent screen renders scopes and reports the approve/deny decision back to Supabase
+
+**What was implemented:** `app/oauth_consent.py` extended with
+`lifecoachEscapeHtml(value)` (HTML-entity escaping for `&`, `<`, `>`, `"`,
+`'` — distinct from the existing `_escape_js_string`, which escapes for a
+JS-string-literal context, not HTML), `lifecoachRenderConsentScreen(client,
+authorizationId, details)` (renders `details.client.name` and each
+space-split scope from `details.scope`, each individually run through
+`lifecoachEscapeHtml` before being concatenated into the consent screen's
+`innerHTML`, plus Approve/Deny buttons wired to
+`lifecoachHandleConsentDecision`), and `lifecoachHandleConsentDecision(client,
+authorizationId, decision)` (calls `approveAuthorization`/
+`denyAuthorization`, navigates via `window.location.href =
+data.redirect_url` on success, and shows a retryable
+`"Something went wrong. Please try again."` message — clearing any prior
+error at the start of each attempt, never removing or disabling the buttons
+— on a falsy/incomplete response or a thrown exception). The existing
+`renderLoginOrConsent`'s session-present branch now calls
+`client.auth.oauth.getAuthorizationDetails(authorizationId)` inside a
+`try`/`catch`, routing to `lifecoachRenderConsentScreen` on success or to
+the same shared `lifecoachRenderFailureState` helper already used for the
+missing-`authorization_id` case (both the error-response branch and the
+catch block) on failure — replacing the loading-state stub this story's
+fetch call now uses for its real intended transitional purpose.
+
+**What was tested and why:** Read the full current `app/oauth_consent.py`
+end to end before writing any test, including re-verifying (not just
+trusting) the claim that the failure-state path reuses the existing shared
+helper rather than introducing a second, parallel implementation. Per
+`rules/testing.md`, this is new non-trivial rendering, escaping, and
+state-transition logic, so unit tests were required. Feature tests were
+judged **not required**, same rationale as story 002: no new HTTP route or
+server-side behavior. E2E (Playwright) was **not** written, for the same
+reason as stories 001/002: no live Supabase deployment exists yet to verify
+the real `getAuthorizationDetails`/`approveAuthorization`/
+`denyAuthorization` wire contracts against — flagged explicitly as
+unverified external-contract assumptions in `test-results.md`.
+
+- **Unit tests** (`tests/unit/test_oauth_consent.py`, 22 new tests added to
+  the existing file): `getAuthorizationDetails` is called on the
+  active-session path and routes to the consent screen on success or the
+  shared failure-state helper on error/thrown-exception (with a dedicated
+  test confirming genuine reuse — one helper function definition, one
+  message literal used at all three call sites — rather than a new
+  parallel implementation); the consent screen renders `client.name` and
+  every scope; **the security-critical escaping requirement** is verified
+  three ways — confirming `lifecoachEscapeHtml` (not `_escape_js_string`) is
+  the exact function called on both `details.client.name` and each
+  individual scope token inside the `.map()` callback, confirming the raw
+  unescaped `details.client.name` expression never appears inside the
+  literal `innerHTML =` assignment text (only the pre-escaped variable
+  does), and running two constructed hostile payloads (an `<img
+  src=x onerror=alert(1)>` XSS payload as a hostile client name, a
+  `read"><script>alert(document.cookie)</script>` attribute-breakout
+  payload as a hostile scope) through a faithful Python re-implementation
+  of `lifecoachEscapeHtml`'s exact replacement chain, confirming both are
+  fully neutralized; Approve/Deny buttons are wired to
+  `lifecoachHandleConsentDecision` with the correct decision string, which
+  calls the correct SDK method per decision and navigates via
+  `window.location.href` on success; the approve/deny failure path (missing
+  `redirect_url`, `error`, or a thrown exception) shows a retryable error
+  message without navigating, removing, or disabling the buttons, and
+  clears any prior error at the start of each new attempt.
+- The AC2 security requirement (HTML-escaping before any `innerHTML`
+  insertion) was independently verified, not just trusted from reading the
+  code: confirmed `lifecoachEscapeHtml` is structurally distinct from
+  `_escape_js_string` (different escaping rules for a different injection
+  context), confirmed it is actually invoked at both insertion points, and
+  confirmed via hostile-payload simulation that it neutralizes a realistic
+  `<script>`/`<img onerror>`-style XSS attempt the same way any HTML-escaping
+  helper must.
+- One stale documentation note (not a test/behavior issue) was found and
+  flagged rather than silently fixed: `render_oauth_consent_page`'s
+  docstring still describes the consent screen as a stub this story
+  replaces, in present tense, which is now inaccurate documentation since
+  this story has already replaced it.
+
+**Test results:** 22 new unit tests, 255/255 full suite passing across two
+consecutive runs with no flakiness (up from the 233 baseline after
+LFC-STORY-005-002). No feature or E2E tests were added — see
+`test-results.md` for the full per-acceptance-criterion breakdown, the
+hostile-payload escaping verification, the failure-state-reuse verification,
+and the explicitly flagged unverified `getAuthorizationDetails`/
+`approveAuthorization`/`denyAuthorization` wire-contract assumptions
+(`PASS WITH CAVEATS`).
+
+## Overall feature summary: LFC-005-oauth-consent-login
+
+All three stories are implemented, tested, and verdict `PASS WITH CAVEATS`.
+The feature builds a complete OAuth 2.1 consent flow at `GET
+/oauth/consent`: the missing-`authorization_id` failure state (001), the
+login form for unauthenticated visitors (002), and the
+authorization-details fetch, HTML-escaped consent screen, and
+approve/deny-with-redirect flow (003), all sharing one failure-state helper
+and one consistent escaping discipline appropriate to each injection context
+(`_escape_js_string` for server-injected JS string literals,
+`lifecoachEscapeHtml` for OAuth-client-controlled values rendered into
+`innerHTML`). The single caveat carried through every story: no automated
+E2E test exists against a real, live Supabase deployment, since none exists
+yet — all of Supabase's actual wire-format/response-shape assumptions
+(`signInWithPassword`, `getAuthorizationDetails`,
+`approveAuthorization`/`denyAuthorization`) remain explicitly flagged,
+unverified external-contract risks pending the user's manual verification
+against a real deployment.

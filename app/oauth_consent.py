@@ -11,11 +11,12 @@ constants, an f-string-assembled `<!DOCTYPE html>` document, `html.escape`
 discipline) follows the same convention as `app/ui_templates.py`.
 
 LFC-STORY-005-001 built the page shell: CDN script load, config injection,
-and the missing-`authorization_id` failure state. LFC-STORY-005-002 (this
-story) fills in the login form: a session check, an email/password form
-rendered when there's no active session, and `signInWithPassword` wired to
-submit. The consent screen itself is still a loading-state stub, left for
-LFC-STORY-005-003 to replace.
+and the missing-`authorization_id` failure state. LFC-STORY-005-002 filled
+in the login form: a session check, an email/password form rendered when
+there's no active session, and `signInWithPassword` wired to submit.
+LFC-STORY-005-003 (this story) replaces the post-login loading-state stub
+with the real consent screen: `getAuthorizationDetails`, the
+approve/deny actions, and the redirect each returns.
 """
 
 _SUPABASE_JS_CDN_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.js"
@@ -88,6 +89,73 @@ body {
   font-size: 13px;
   color: #8a5a3c;
 }
+.consent-screen {
+  padding: 20px 0 8px;
+}
+.consent-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: #2e2a25;
+}
+.consent-subtitle {
+  font-size: 13px;
+  color: #8a8073;
+  margin: 0 0 18px;
+}
+.consent-client-name {
+  font-weight: 600;
+  color: #3a352f;
+}
+.scope-list {
+  list-style: none;
+  margin: 0 0 24px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.scope-item {
+  background: #ffffff;
+  border: 1px solid #efe9e1;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #3a352f;
+}
+.consent-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.consent-approve {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 10px;
+  background: #3a352f;
+  color: #f7f3ee;
+  font-size: 14px;
+  cursor: pointer;
+}
+.consent-deny {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid #ddd3c6;
+  border-radius: 10px;
+  background: transparent;
+  color: #3a352f;
+  font-size: 14px;
+  cursor: pointer;
+}
+.consent-action-error {
+  margin-top: 14px;
+  background: #f6ece6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #8a5a3c;
+}
 """
 
 _SCRIPT_TEMPLATE = """
@@ -103,6 +171,77 @@ function lifecoachRenderFailureState(message) {{
 function lifecoachRenderLoadingState() {{
   document.getElementById("oauth-consent-root").innerHTML =
     '<div class="loading-state">Loading...</div>';
+}}
+
+function lifecoachEscapeHtml(value) {{
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}}
+
+function lifecoachRenderConsentScreen(client, authorizationId, details) {{
+  const safeClientName = lifecoachEscapeHtml(details.client.name);
+  const scopes = details.scope.split(" ").filter(function (scope) {{
+    return scope.length > 0;
+  }});
+  const scopeItems = scopes
+    .map(function (scope) {{
+      return '<li class="scope-item">' + lifecoachEscapeHtml(scope) + "</li>";
+    }})
+    .join("");
+
+  document.getElementById("oauth-consent-root").innerHTML =
+    '<div class="consent-screen">' +
+    '<p class="consent-title">Connect your account</p>' +
+    '<p class="consent-subtitle"><span class="consent-client-name">' +
+    safeClientName +
+    "</span> wants to access:</p>" +
+    '<ul class="scope-list">' +
+    scopeItems +
+    "</ul>" +
+    '<div class="consent-actions">' +
+    '<button class="consent-approve" type="button" id="oauth-consent-approve">Approve</button>' +
+    '<button class="consent-deny" type="button" id="oauth-consent-deny">Deny</button>' +
+    '</div>' +
+    '<p class="consent-action-error" id="oauth-consent-action-error" hidden></p>' +
+    "</div>";
+
+  document
+    .getElementById("oauth-consent-approve")
+    .addEventListener("click", function () {{
+      lifecoachHandleConsentDecision(client, authorizationId, "approve");
+    }});
+  document
+    .getElementById("oauth-consent-deny")
+    .addEventListener("click", function () {{
+      lifecoachHandleConsentDecision(client, authorizationId, "deny");
+    }});
+}}
+
+async function lifecoachHandleConsentDecision(client, authorizationId, decision) {{
+  const errorEl = document.getElementById("oauth-consent-action-error");
+  errorEl.hidden = true;
+
+  try {{
+    const {{ data, error }} =
+      decision === "approve"
+        ? await client.auth.oauth.approveAuthorization(authorizationId)
+        : await client.auth.oauth.denyAuthorization(authorizationId);
+
+    if (error || !data || !data.redirect_url) {{
+      errorEl.textContent = "Something went wrong. Please try again.";
+      errorEl.hidden = false;
+      return;
+    }}
+
+    window.location.href = data.redirect_url;
+  }} catch (caughtError) {{
+    errorEl.textContent = "Something went wrong. Please try again.";
+    errorEl.hidden = false;
+  }}
 }}
 
 function lifecoachRenderLoginForm(client, authorizationId) {{
@@ -141,10 +280,6 @@ async function lifecoachHandleLoginSubmit(client, authorizationId) {{
 }}
 
 async function renderLoginOrConsent(client, authorizationId) {{
-  // Login form lands in LFC-STORY-005-002; the consent screen itself is
-  // built in LFC-STORY-005-003. Once a session exists, this only shows a
-  // generic loading state until that story fills in the real
-  // getAuthorizationDetails call.
   const {{ data }} = await client.auth.getSession();
 
   if (!data.session) {{
@@ -153,6 +288,25 @@ async function renderLoginOrConsent(client, authorizationId) {{
   }}
 
   lifecoachRenderLoadingState();
+
+  try {{
+    const {{ data: details, error }} = await client.auth.oauth.getAuthorizationDetails(
+      authorizationId
+    );
+
+    if (error || !details) {{
+      lifecoachRenderFailureState(
+        "This link is invalid or has expired. Please try connecting again from the app."
+      );
+      return;
+    }}
+
+    lifecoachRenderConsentScreen(client, authorizationId, details);
+  }} catch (caughtError) {{
+    lifecoachRenderFailureState(
+      "This link is invalid or has expired. Please try connecting again from the app."
+    );
+  }}
 }}
 
 function lifecoachInit() {{
@@ -185,16 +339,20 @@ def render_oauth_consent_page(supabase_url: str, supabase_anon_key: str) -> str:
     still injected via an escaped JS string literal rather than interpolated
     as raw HTML.
 
-    Implements, across LFC-STORY-005-001 and LFC-STORY-005-002:
+    Implements, across LFC-STORY-005-001 through LFC-STORY-005-003:
     - The page shell and the pinned-version `supabase-js` CDN script tag.
     - The missing-`authorization_id` failure state.
     - A session check: if no active Supabase session exists, an
       email/password login form is rendered and wired to
       `signInWithPassword`, with a generic invalid-credentials error on
-      failure and no page reload required to retry. If a session exists
-      (or is just established by a successful login), the page shows a
-      generic loading state, a stub the consent screen (LFC-STORY-005-003)
-      replaces without needing this shell to change.
+      failure and no page reload required to retry.
+    - Once a session exists (or is just established by a successful
+      login), `getAuthorizationDetails` is fetched and rendered as a
+      consent screen (client name + requested scopes, both HTML-escaped),
+      with Approve/Deny wired to `approveAuthorization`/
+      `denyAuthorization` and a redirect to the returned `redirect_url`.
+      An invalid/expired `authorization_id` routes to the same shared
+      failure-state rendering used for the missing-parameter case.
     """
     script = _SCRIPT_TEMPLATE.format(
         supabase_url=_escape_js_string(supabase_url),

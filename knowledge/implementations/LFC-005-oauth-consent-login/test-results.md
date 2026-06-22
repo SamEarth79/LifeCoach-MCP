@@ -391,3 +391,312 @@ rationale as story 001, no E2E test was written; the real
 `signInWithPassword` wire-contract shape remains an explicitly flagged,
 unverified assumption pending a live Supabase instance — recorded as this
 story's `PASS WITH CAVEATS` caveat, not silently passed.
+
+## LFC-STORY-005-003
+
+**Verdict: PASS WITH CAVEATS** — same out-of-scope-E2E rationale as stories
+001/002 (no live Supabase deployment exists yet to verify the real
+`getAuthorizationDetails`/`approveAuthorization`/`denyAuthorization` wire
+contracts against); covered instead by unit tests only, against the actual
+JS source structure embedded in `render_oauth_consent_page`'s output.
+
+### Implementation verified against the code (read in full before writing any test)
+
+Read the full current `app/oauth_consent.py` end to end, confirming:
+
+- `lifecoachEscapeHtml(value)` is a distinct function from `_escape_js_string`
+  — it performs HTML-entity escaping (`&`->`&amp;`, `<`->`&lt;`, `>`->`&gt;`,
+  `"`->`&quot;`, `'`->`&#39;`), the correct escaping discipline for a value
+  being concatenated into an `innerHTML`-bound string, as opposed to
+  `_escape_js_string`'s JS-string-literal escaping (backslash/quote/
+  `</script>`), which is the wrong context for this sink.
+- `lifecoachRenderConsentScreen(client, authorizationId, details)` computes
+  `safeClientName = lifecoachEscapeHtml(details.client.name)` and, inside the
+  `scopes.map(...)` callback, computes
+  `lifecoachEscapeHtml(scope)` for every individual space-split scope token,
+  before concatenating either into the `innerHTML` string. The raw
+  `details.client.name` value and raw scope strings are never concatenated
+  directly — only the escaped `safeClientName`/`scopeItems` variables are.
+  Confirmed this by isolating the literal `innerHTML =` assignment's source
+  text and asserting `details.client.name` does not appear in it at all.
+- `lifecoachHandleConsentDecision(client, authorizationId, decision)` calls
+  `client.auth.oauth.approveAuthorization(authorizationId)` when
+  `decision === "approve"` and `client.auth.oauth.denyAuthorization(authorizationId)`
+  otherwise; on success (`data.redirect_url` present, no `error`) it sets
+  `window.location.href = data.redirect_url`; on a falsy/incomplete response
+  (`error`, missing `data`, or missing `data.redirect_url`) or a thrown
+  exception (caught via `try`/`catch`), it sets the same generic
+  `"Something went wrong. Please try again."` message on the
+  `#oauth-consent-action-error` element and unhides it, without navigating,
+  removing the buttons, disabling them, or rewriting `innerHTML` — so a
+  retry is always possible without a reload. It also unhides-then-rehides
+  (`errorEl.hidden = true`) at the very start of each invocation, so a retry
+  after a prior failure doesn't get stuck showing the stale error
+  indefinitely.
+- `renderLoginOrConsent`'s session-present branch (after
+  `lifecoachRenderLoadingState()`) calls
+  `client.auth.oauth.getAuthorizationDetails(authorizationId)` inside a
+  `try`/`catch`. On `error || !details`, and in the `catch` block, **both**
+  call the exact same `lifecoachRenderFailureState("This link is invalid or
+  has expired. Please try connecting again from the app.")` invocation used
+  by `lifecoachInit`'s missing-`authorization_id` branch — confirmed there is
+  only one `function lifecoachRenderFailureState(` definition in the whole
+  file and the exact failure-message literal appears exactly 3 times (one
+  per call site: missing-id, details-fetch-error, details-fetch-throw), so
+  this is genuine reuse of the single shared helper, not a new parallel
+  implementation that could drift from it.
+- On a successful fetch, `lifecoachRenderConsentScreen(client, authorizationId,
+  details)` is called, which wires the rendered Approve/Deny buttons'
+  `click` listeners to `lifecoachHandleConsentDecision(client, authorizationId,
+  "approve")` / `"deny"` respectively.
+
+### Layers required
+
+- Unit: required — `lifecoachEscapeHtml`, `lifecoachRenderConsentScreen`,
+  `lifecoachHandleConsentDecision`, and the updated `renderLoginOrConsent` are
+  new/changed non-trivial rendering, escaping, and state-transition logic.
+  Added 22 new tests to the existing `tests/unit/test_oauth_consent.py` (no
+  second file created, per the established one-module-per-renderer
+  convention).
+- Feature: **not required** — same rationale as story 002: no new HTTP route
+  or server-side behavior; the existing `GET /oauth/consent` feature tests
+  from story 001 already cover the route's request/response contract, and
+  this story's behavior lives entirely in client-side JS with no additional
+  HTTP-layer surface to exercise.
+- E2E (Playwright): **not added**, per `requirements.md`'s explicit
+  out-of-scope note — no live Supabase deployment exists to verify the real
+  `getAuthorizationDetails`/`approveAuthorization`/`denyAuthorization` wire
+  contracts against. A Playwright test against a mocked backend would only
+  prove self-consistency with the same response-shape assumption already
+  baked into the implementation, not the real external contract. Flagged
+  explicitly below per `rules/testing.md`'s "External-contract assumptions"
+  section.
+
+### Unit tests — 22 new, all passing
+
+Added to `tests/unit/test_oauth_consent.py`:
+
+1. `test_render_login_or_consent_calls_get_authorization_details_when_session_active`
+   — AC1: confirms `client.auth.oauth.getAuthorizationDetails(authorizationId)`
+   is called in the active-session branch.
+2. `test_render_login_or_consent_routes_to_consent_screen_on_successful_details_fetch`
+   — AC1: confirms `lifecoachRenderConsentScreen(client, authorizationId, details)`
+   is called on success.
+3. `test_render_login_or_consent_routes_to_failure_state_when_details_fetch_errors`
+   — AC5: confirms the `error || !details` branch calls
+   `lifecoachRenderFailureState` with the non-technical message.
+4. `test_render_login_or_consent_routes_to_failure_state_when_get_authorization_details_throws`
+   — AC5: confirms the `catch` block also routes to
+   `lifecoachRenderFailureState`, so a thrown exception doesn't crash the
+   page.
+5. `test_failure_state_helper_used_for_authorization_details_error_is_the_same_function_as_missing_id_case`
+   — AC5, the "verify reuse not drift" check: confirms there's exactly one
+   `lifecoachRenderFailureState` function definition and the exact failure
+   message literal appears exactly 3 times (missing-id,
+   details-fetch-error, details-fetch-throw) — all sharing the single
+   helper, not a new parallel implementation.
+6. `test_render_consent_screen_renders_client_name_and_scopes` — AC1:
+   confirms `details.client.name`, `details.scope.split(" ")`, and the
+   `scope-item`/`scope-list` markup are present.
+7. `test_render_consent_screen_escapes_client_name_with_html_escape_helper_not_js_string_escape`
+   — **AC2, security-critical**: confirms `lifecoachEscapeHtml(details.client.name)`
+   is the exact expression used — not `_escape_js_string`.
+8. `test_render_consent_screen_escapes_every_scope_with_html_escape_helper` —
+   **AC2, security-critical**: confirms `lifecoachEscapeHtml(scope)` is
+   called inside the per-scope `.map()` callback, so every individual scope
+   token is escaped, not just the joined string.
+9. `test_consent_screen_client_name_and_scopes_never_inserted_into_innerhtml_unescaped`
+   — **AC2, security-critical**: isolates the literal `innerHTML =`
+   assignment text and confirms the raw `details.client.name` expression
+   does not appear in it at all — only the pre-escaped `safeClientName`/
+   `scopeItems` variables are concatenated.
+10. `test_lifecoach_escape_html_function_escapes_all_five_html_metacharacters`
+    — structural check that `lifecoachEscapeHtml`'s regex replacements cover
+    all five HTML metacharacters (`&`, `<`, `>`, `"`, `'`) with the correct
+    entity for each.
+11. `test_lifecoach_escape_html_neutralizes_img_onerror_xss_payload_in_client_name_position`
+    — **AC2, security-critical, hostile-payload test**: a constructed
+    `<img src=x onerror=alert(1)>` payload, run through a Python
+    re-implementation of the exact JS replacement chain, is fully
+    neutralized (no raw `<`/`>` survive).
+12. `test_lifecoach_escape_html_neutralizes_attribute_breakout_payload_in_scope_position`
+    — **AC2, security-critical, hostile-payload test**: a
+    `read"><script>alert(document.cookie)</script>` payload (a realistic
+    hostile scope value) is fully neutralized — no raw `"`, `<`, `>` survive.
+13. `test_lifecoach_escape_html_neutralizes_single_quote_breakout_payload` —
+    **AC2, security-critical**: a single-quote attribute-breakout payload is
+    also neutralized, exercising the `'` -> `&#39;` rule distinctly from the
+    double-quote case.
+14. `test_lifecoach_escape_html_is_distinct_from_escape_js_string` — confirms
+    the two escaping functions produce different output for the same hostile
+    input, and that `_escape_js_string`'s output does NOT HTML-escape angle
+    brackets — proving `_escape_js_string` would be the wrong choice for this
+    `innerHTML` sink, the exact mistake AC2 guards against.
+15. `test_consent_screen_renders_approve_and_deny_buttons_wired_to_handler` —
+    AC3/AC4: confirms both buttons exist and their `click` listeners call
+    `lifecoachHandleConsentDecision(client, authorizationId, "approve"/"deny")`
+    respectively.
+16. `test_handle_consent_decision_calls_approve_authorization_on_approve` —
+    AC3: confirms the `"approve"` branch calls
+    `client.auth.oauth.approveAuthorization(authorizationId)`.
+17. `test_handle_consent_decision_calls_deny_authorization_on_deny` — AC4:
+    confirms the `"deny"` branch calls
+    `client.auth.oauth.denyAuthorization(authorizationId)`.
+18. `test_handle_consent_decision_navigates_to_redirect_url_on_success` —
+    AC3/AC4: confirms `window.location.href = data.redirect_url;` is the
+    shared success-path navigation for both decisions.
+19. `test_handle_consent_decision_shows_retryable_error_on_missing_redirect_url`
+    — edge case named in the story: confirms the `error || !data ||
+    !data.redirect_url` branch sets a retryable error message and explicitly
+    does NOT navigate, remove the buttons (`.remove(`), disable them
+    (`.disabled`), or rewrite `innerHTML`.
+20. `test_handle_consent_decision_shows_retryable_error_when_sdk_call_throws`
+    — edge case: confirms a thrown exception is caught and shows the same
+    retryable error, not an unhandled rejection or a dead screen.
+21. `test_handle_consent_decision_clears_previous_error_state_at_start_of_each_attempt`
+    — retry behavior: confirms `errorEl.hidden = true` runs before the
+    `try` block on every invocation, so a second attempt after a failure
+    doesn't get stuck displaying the stale error indefinitely.
+22. `test_consent_action_error_element_starts_hidden_in_rendered_markup` —
+    confirms the error placeholder element is rendered with the `hidden`
+    attribute by default.
+
+### Security review
+
+- **HTML-escaping discipline for an `innerHTML` sink (AC2, the
+  security-critical criterion)**: independently verified, not just trusted
+  from the implementation report, that `client.name` and every individual
+  scope token are run through `lifecoachEscapeHtml` — a genuinely distinct
+  function from `_escape_js_string` with different escaping rules (HTML
+  entities vs. JS-string-literal escaping) — before being concatenated into
+  the `innerHTML`-bound string. Constructed two realistic hostile payloads
+  (`<img src=x onerror=alert(1)>` for a hostile client name,
+  `read"><script>alert(document.cookie)</script>` for a hostile scope value)
+  and confirmed, via a faithful Python re-implementation of the exact JS
+  replacement chain, that both are fully neutralized — no raw `<`, `>`, or
+  `"` survives. Also confirmed structurally that the raw, unescaped
+  `details.client.name` expression never appears inside the `innerHTML =`
+  assignment itself — only the pre-escaped `safeClientName` variable does —
+  ruling out a scenario where escaping is computed but never actually used
+  at the sink.
+- **Approve/deny decision reporting and redirect handling (AC3/AC4)**:
+  confirmed `approveAuthorization`/`denyAuthorization` are called with the
+  correct `authorizationId` for the correct button, and that the
+  `redirect_url` navigation is the single shared success path for both
+  decisions (no separate, possibly-divergent redirect logic per decision).
+- **Failure-state reuse, not drift (AC5)**: confirmed by direct string
+  inspection that there is exactly one `lifecoachRenderFailureState`
+  function definition in the entire file, and the exact non-technical
+  failure message literal is used at all three call sites (missing
+  `authorization_id`, `getAuthorizationDetails` error response, and a
+  thrown exception from `getAuthorizationDetails`) — ruling out a scenario
+  where the agent's report claims reuse but actually wrote a second,
+  parallel failure-rendering implementation that could silently drift from
+  the first over time.
+- **No dead-end error states on approve/deny failure**: confirmed the
+  approve/deny failure path (`error`/missing `data`/missing `redirect_url`,
+  or a thrown exception) only ever sets `errorEl.textContent`/
+  `errorEl.hidden = false` — it never removes, disables, or hides the
+  Approve/Deny buttons themselves, and clears the previous error state at
+  the start of each new attempt, so the user can always click Approve or
+  Deny again to retry without reloading the page.
+
+### Unverified external-contract assumption (flagged per `rules/testing.md`)
+
+`getAuthorizationDetails`'s response shape (`{ data: { client: { name },
+scope }, error }`), and `approveAuthorization`/`denyAuthorization`'s response
+shape (`{ data: { redirect_url }, error }`), are asserted against here as
+fixed assumptions baked into both the implementation and these tests — none
+of the three have been verified against a live Supabase Auth/OAuth 2.1
+Server instance in this session. This is the same category of unverified
+external-contract risk flagged in stories 001 and 002, now extended to the
+three new SDK methods this story is the first to call. The user should
+confirm these shapes against a real Supabase project (or the current
+`@supabase/supabase-js@2.108.2` OAuth docs) before relying on this flow in
+production.
+
+### Final holistic check across all three stories (LFC-005-oauth-consent-login complete)
+
+Read the entire current `app/oauth_consent.py` end to end (not just the
+story-003 diff) to confirm the full three-story flow is internally
+consistent:
+
+- `lifecoachInit` -> missing-`authorization_id` failure state, or
+  `renderLoginOrConsent` -> (no session) `lifecoachRenderLoginForm` ->
+  `lifecoachHandleLoginSubmit` -> on success, re-invokes
+  `renderLoginOrConsent` -> (session present) `lifecoachRenderLoadingState`
+  (a genuine brief transitional state while the fetch is in flight, not an
+  orphaned placeholder — the original story-001 loading-state stub is now
+  exercised for its real intended purpose) -> `getAuthorizationDetails` ->
+  either `lifecoachRenderConsentScreen` or the shared
+  `lifecoachRenderFailureState`. No leftover/orphaned code from the
+  original story-001 stub was found: `lifecoachRenderLoadingState` is still
+  defined once and used exactly once, in its original intended spot.
+- `lifecoachRenderFailureState` is the single failure-state implementation
+  used by all three stories' failure paths (missing ID, login errors use a
+  separate dedicated `login-error` element by design since AC3 requires
+  in-form retry rather than a full failure-state replacement, and the two
+  `getAuthorizationDetails` failure paths from this story) — confirmed no
+  second/parallel failure-rendering function exists anywhere in the file.
+- One stale piece of *documentation* (not behavior) was noticed and is
+  flagged here rather than silently fixed, per the qa agent's role: the
+  module-level docstring on `render_oauth_consent_page` (lines ~342-351)
+  still describes the consent screen as "a stub the consent screen
+  (LFC-STORY-005-003) replaces" as of stories 001/002 — this is now stale
+  since story 003 has replaced that stub with the real consent screen. This
+  is a documentation-accuracy nit, not a functional or test issue, and is
+  surfaced for the orchestrator/frontend agent to update rather than
+  corrected here.
+
+### Full suite regression check
+
+Ran `uv run pytest` from the repo root twice in a row:
+
+- Run 1: **255 passed**, 0 failed, 36 warnings (same pre-existing
+  deprecation warnings as before, unrelated to this story).
+- Run 2: **255 passed**, 0 failed, 36 warnings — identical result, no
+  flakiness.
+
+255 = 233 (prior baseline after LFC-STORY-005-002) + 22 new unit tests = 255.
+
+### Totals: 22 new unit tests, 255/255 full suite passing across two
+consecutive runs, 0 failed, no flakiness. All 5 acceptance criteria are
+covered by at least one test each, with AC2 (the security-critical
+HTML-escaping requirement) independently verified via constructed hostile
+XSS/attribute-breakout payloads run through a faithful re-implementation of
+the exact JS escaping logic, and structurally confirmed that the raw,
+unescaped `client.name`/scope values never reach the `innerHTML` sink — only
+the pre-escaped variables do. AC5's failure-state reuse claim was verified
+to be genuine (one shared helper function, one message literal used at all
+three call sites), not a new parallel implementation. Per
+`requirements.md`'s explicit scope note, no E2E test was written; the real
+`getAuthorizationDetails`/`approveAuthorization`/`denyAuthorization` wire
+contracts remain explicitly flagged, unverified assumptions pending a live
+Supabase instance — recorded as this story's `PASS WITH CAVEATS` caveat, not
+silently passed.
+
+## Overall feature summary: LFC-005-oauth-consent-login
+
+All three stories (LFC-STORY-005-001, -002, -003) are complete and tested.
+Combined: 46 unit tests (14 + 10 + 22) plus 6 feature tests from story 001 =
+52 new automated tests for this feature, contributing to a final full-suite
+total of **255 passing, 0 failed**, confirmed stable across two consecutive
+runs at the end of each story. Every acceptance criterion across all three
+stories' story files is covered by at least one test assertion.
+
+**Feature-level verdict: PASS WITH CAVEATS.** The single caveat, carried
+identically through every story in this feature: per `requirements.md`'s
+explicit "Out of scope" note, no automated end-to-end (Playwright) test was
+written against a real, live Supabase deployment, because no such
+deployment exists yet — there is no real "Site URL"/"Authorization Path"
+configured to redirect a browser to this page in practice. All three
+stories' unverified external-contract assumptions about Supabase's actual
+wire formats (`signInWithPassword`, `getAuthorizationDetails`,
+`approveAuthorization`/`denyAuthorization` response shapes) remain
+explicitly flagged, unverified risks rather than settled facts — the
+self-consistency unit tests in this suite prove the implementation behaves
+correctly *given* those assumed shapes, not that the assumed shapes match
+Supabase's real behavior. The user must manually verify the complete live
+flow (login -> consent -> approve/deny -> redirect back to the OAuth client)
+against a real Supabase project before relying on this feature in
+production.
