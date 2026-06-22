@@ -211,3 +211,183 @@ external contract against a real Supabase "Site URL"/"Authorization Path"
 deployment remains genuinely unverified and is the responsibility of the
 user's manual verification once a real deployment exists; this is recorded
 as the story's `PASS WITH CAVEATS` caveat, not silently passed.
+
+## LFC-STORY-005-002
+
+**Verdict: PASS WITH CAVEATS** — same out-of-scope-E2E rationale as story
+001 (no live Supabase deployment exists yet to test the real
+`signInWithPassword` wire contract against); covered instead by unit tests
+only, against the actual JS source structure embedded in
+`render_oauth_consent_page`'s output.
+
+### Implementation verified against the code (read in full before writing any test)
+
+Read the full current `app/oauth_consent.py`, confirming:
+
+- `lifecoachRenderLoginForm(client, authorizationId)` renders a form with an
+  `id="oauth-login-email"` (`type="email"`) field, an
+  `id="oauth-login-password"` (`type="password"`) field, a submit button, and
+  a hidden `id="oauth-login-error"` paragraph for the error message — no
+  signup/account-creation link or text anywhere in the form markup.
+- The form's `submit` listener calls `event.preventDefault()` then
+  `lifecoachHandleLoginSubmit(client, authorizationId)` — no native form
+  submission/page reload on submit.
+- `lifecoachHandleLoginSubmit` reads `email`/`password` from the two input
+  elements' `.value`, calls
+  `client.auth.signInWithPassword({ email, password })`, and on `error`
+  sets `errorEl.textContent = "Invalid email or password."` and
+  `errorEl.hidden = false`, then `return`s — no `window.location` assignment,
+  no DOM removal/`innerHTML` rewrite, and no use of the `email`/`password`
+  variables anywhere in that branch (only the fixed generic literal string,
+  which itself happens to contain the substring "email" as English prose,
+  not as the variable).
+- On success (no `error`), it calls
+  `renderLoginOrConsent(client, authorizationId)` — re-running the session
+  check rather than navigating away.
+- `renderLoginOrConsent` now calls `client.auth.getSession()` first; if
+  `!data.session` it calls `lifecoachRenderLoginForm(...)` and returns;
+  otherwise it falls through to `lifecoachRenderLoadingState()` (the
+  consent-screen stub, unchanged from story 001, still a placeholder for
+  LFC-STORY-005-003).
+- Grepped the entire file (`grep -in "sign up|signup|create account|register"
+  app/oauth_consent.py`) — zero matches. No signup link or account-creation
+  text exists anywhere in the file.
+
+### Layers required
+
+- Unit: required — `lifecoachRenderLoginForm`, `lifecoachHandleLoginSubmit`,
+  and the updated `renderLoginOrConsent` are new/changed non-trivial
+  conditional-rendering and state-transition logic. Added 10 new tests to
+  the existing `tests/unit/test_oauth_consent.py` (no second file created
+  for the same module, per the existing one-module-per-renderer
+  convention).
+- Feature: **not required** — this story adds no new HTTP route and no new
+  server-side behavior; the existing `GET /oauth/consent` feature tests from
+  story 001 already cover the route itself, and the returned HTML body
+  growing with more embedded JS doesn't change the route's
+  request/response contract. Per `rules/testing.md`'s scoping rule, feature
+  tests are for a story's behavior end-to-end within its own layer — this
+  story's behavior (login form interaction, `signInWithPassword` call
+  wiring) lives entirely in untestable-from-Python client-side JS, the same
+  rationale story 001 used for skipping E2E on its own JS logic, just one
+  layer down: there is no real HTTP layer to additionally exercise here
+  beyond what's already covered.
+- E2E (Playwright): **not added**, same rationale as story 001 — no live
+  Supabase deployment exists to test the real `signInWithPassword` wire
+  contract against; a Playwright test against a mocked/fake Supabase
+  backend would only prove internal self-consistency with the same
+  assumption the implementation already makes about Supabase's response
+  shape, not the real external contract. Flagged as the explicit unverified
+  assumption below, per `rules/testing.md`'s "External-contract assumptions"
+  section.
+
+### Unit tests — 10 new, all passing
+
+Added to `tests/unit/test_oauth_consent.py`:
+
+1. `test_render_oauth_consent_page_renders_login_form_when_no_active_session`
+   — AC1: isolates `renderLoginOrConsent`'s source and confirms the
+   `if (!data.session)` branch calls
+   `lifecoachRenderLoginForm(client, authorizationId)`.
+2. `test_login_form_html_contains_email_and_password_fields_only` — AC1: the
+   rendered form markup contains exactly an email field, a password field,
+   and an error placeholder — no other input fields.
+3. `test_login_form_submit_handler_is_wired_to_lifecoach_handle_login_submit`
+   — AC2 setup: confirms the submit listener calls `preventDefault()` then
+   `lifecoachHandleLoginSubmit(client, authorizationId)`.
+4. `test_handle_login_submit_calls_sign_in_with_password_with_email_and_password_argument_shape`
+   — AC2: confirms `client.auth.signInWithPassword({ email, password })` is
+   called with values read from the email/password input elements'
+   `.value`.
+5. `test_handle_login_submit_calls_render_login_or_consent_on_success` — AC2:
+   confirms the success path (no `error`) calls
+   `renderLoginOrConsent(client, authorizationId)`, transitioning onward by
+   re-running the session check rather than any other mechanism.
+6. `test_handle_login_submit_shows_single_generic_error_message_on_invalid_credentials`
+   — AC3 + security rule: the literal string `"Invalid email or password."`
+   appears in the error branch and appears exactly once anywhere in the
+   whole rendered page; confirms no field-specific or
+   account-existence-revealing strings (`"email not found"`,
+   `"no such user"`, `"wrong password"`, `"user not found"`,
+   `"does not exist"`) appear anywhere in the handler.
+7. `test_handle_login_submit_error_path_only_sets_error_text_and_does_not_navigate_or_remove_form`
+   — AC3: confirms the error branch contains no `window.location`
+   assignment and no `.remove(`/`.innerHTML` DOM-teardown call — only
+   `errorEl.textContent`/`errorEl.hidden` are set, so the form survives a
+   failed login and the user can retry without a reload.
+8. `test_handle_login_submit_never_logs_or_echoes_submitted_credentials` —
+   security (this repo's no-email-enumeration discipline, extended to
+   credential confidentiality): confirms no `console.log`/`console.error`/
+   `console.warn` calls exist in the handler, and that the `email`/
+   `password` variables never appear in the error branch (only the fixed
+   generic literal string, which is excluded from the check before
+   asserting).
+9. `test_no_signup_or_account_creation_text_anywhere_in_rendered_page` — AC4:
+   confirms none of "sign up", "signup", "create account",
+   "create an account", "register" (case-insensitive) appear anywhere in
+   the full rendered page.
+10. `test_render_login_or_consent_shows_loading_state_when_session_already_active`
+    — regression/symmetric case for AC1-AC2: confirms an active session
+    skips the login form entirely and falls through to
+    `lifecoachRenderLoadingState()`.
+
+### Security review
+
+- **Single generic error message, no enumeration**: confirmed the error
+  branch contains exactly one fixed literal string
+  (`"Invalid email or password."`) regardless of failure reason — there is
+  no conditional branching on `error.message`/`error.status`/any other
+  property of the SDK's error object that would produce a different message
+  for "wrong password" vs. "no such user". The code unconditionally sets
+  the same string whenever `error` is truthy, so no code path exists that
+  could leak which emails are registered.
+- **No credential logging/echoing**: confirmed the `email`/`password`
+  variables are read once (from the input elements), passed directly into
+  `signInWithPassword`, and never referenced again anywhere else in the
+  function — not in the error branch, not via `console.*`, not interpolated
+  into any rendered text.
+- **No premature page teardown on failure**: confirmed the error path is a
+  pure DOM-text-content update (`textContent`/`hidden`) with no
+  `window.location` reassignment and no removal/replacement of the form's
+  DOM subtree, so a failed login attempt leaves the form intact and
+  resubmittable without a page reload, satisfying AC3's "lets the user retry
+  without a page reload" requirement directly, not just by absence of an
+  explicit redirect.
+
+### Unverified external-contract assumption (flagged per `rules/testing.md`)
+
+`signInWithPassword({ email, password })`'s actual success/error response
+shape (a `{ data, error }` object, with `error` falsy on success) is
+asserted against here as a fixed assumption baked into both the
+implementation and these tests — it has not been verified against a live
+Supabase Auth instance in this session. This is the same category of
+unverified external-contract risk story 001 flagged for the overall
+OAuth flow; it is not a new risk introduced by this story, but is
+re-flagged explicitly here since this story is the first to actually call
+an Auth SDK method. The user should confirm this shape against a real
+Supabase project (or the current `@supabase/supabase-js@2.108.2` docs)
+before relying on this flow in production.
+
+### Full suite regression check
+
+Ran `uv run pytest` from the repo root twice in a row:
+
+- Run 1: **233 passed**, 0 failed, 36 warnings (same pre-existing
+  deprecation warnings as before, unrelated to this story).
+- Run 2: **233 passed**, 0 failed, 36 warnings — identical result, no
+  flakiness.
+
+233 = 223 (prior baseline after LFC-STORY-005-001) + 10 new unit tests = 233.
+
+### Totals: 10 new unit tests, 233/233 full suite passing across two
+consecutive runs, 0 failed, no flakiness. All 4 acceptance criteria are
+covered by at least one test each. The single-generic-error-message /
+no-enumeration security requirement was independently verified by asserting
+the absence of any field-specific or account-existence-revealing error
+strings, not just the presence of the correct generic one. No signup/
+account-creation text exists anywhere in the file, confirmed both by direct
+grep and by an automated regression test. Per the same out-of-scope
+rationale as story 001, no E2E test was written; the real
+`signInWithPassword` wire-contract shape remains an explicitly flagged,
+unverified assumption pending a live Supabase instance — recorded as this
+story's `PASS WITH CAVEATS` caveat, not silently passed.

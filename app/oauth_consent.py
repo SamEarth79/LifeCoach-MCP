@@ -10,11 +10,12 @@ page), but the string-template structure (module-level style/script
 constants, an f-string-assembled `<!DOCTYPE html>` document, `html.escape`
 discipline) follows the same convention as `app/ui_templates.py`.
 
-This story (LFC-STORY-005-001) only builds the page shell: CDN script load,
-config injection, and the missing-`authorization_id` failure state. The
-login form and consent screen are filled in by `_render_login_form` and
-`_render_consent_screen` in later stories — both are left as named stubs
-below so this file doesn't need restructuring when they land.
+LFC-STORY-005-001 built the page shell: CDN script load, config injection,
+and the missing-`authorization_id` failure state. LFC-STORY-005-002 (this
+story) fills in the login form: a session check, an email/password form
+rendered when there's no active session, and `signInWithPassword` wired to
+submit. The consent screen itself is still a loading-state stub, left for
+LFC-STORY-005-003 to replace.
 """
 
 _SUPABASE_JS_CDN_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.108.2/dist/umd/supabase.js"
@@ -53,6 +54,40 @@ body {
   font-size: 13px;
   color: #8a5a3c;
 }
+.login-form {
+  padding: 20px 0 8px;
+}
+.login-form label {
+  display: block;
+  font-size: 13px;
+  margin: 14px 0 6px;
+}
+.login-form input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #ddd3c6;
+  border-radius: 10px;
+  font-size: 14px;
+}
+.login-form button {
+  width: 100%;
+  margin-top: 20px;
+  padding: 12px;
+  border: none;
+  border-radius: 10px;
+  background: #3a352f;
+  color: #f7f3ee;
+  font-size: 14px;
+  cursor: pointer;
+}
+.login-error {
+  margin-top: 14px;
+  background: #f6ece6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #8a5a3c;
+}
 """
 
 _SCRIPT_TEMPLATE = """
@@ -70,10 +105,53 @@ function lifecoachRenderLoadingState() {{
     '<div class="loading-state">Loading...</div>';
 }}
 
-function renderLoginOrConsent(client, authorizationId) {{
-  // Stub for LFC-STORY-005-002 (login form) and LFC-STORY-005-003
-  // (consent screen). For now this only shows a generic loading state;
-  // the real session check / getAuthorizationDetails call lands later.
+function lifecoachRenderLoginForm(client, authorizationId) {{
+  document.getElementById("oauth-consent-root").innerHTML =
+    '<form class="login-form" id="oauth-login-form">' +
+    '<label for="oauth-login-email">Email</label>' +
+    '<input type="email" id="oauth-login-email" autocomplete="email" required>' +
+    '<label for="oauth-login-password">Password</label>' +
+    '<input type="password" id="oauth-login-password" autocomplete="current-password" required>' +
+    '<button type="submit">Log in</button>' +
+    '<p class="login-error" id="oauth-login-error" hidden></p>' +
+    '</form>';
+
+  document
+    .getElementById("oauth-login-form")
+    .addEventListener("submit", function (event) {{
+      event.preventDefault();
+      lifecoachHandleLoginSubmit(client, authorizationId);
+    }});
+}}
+
+async function lifecoachHandleLoginSubmit(client, authorizationId) {{
+  const email = document.getElementById("oauth-login-email").value;
+  const password = document.getElementById("oauth-login-password").value;
+
+  const {{ error }} = await client.auth.signInWithPassword({{ email, password }});
+
+  if (error) {{
+    const errorEl = document.getElementById("oauth-login-error");
+    errorEl.textContent = "Invalid email or password.";
+    errorEl.hidden = false;
+    return;
+  }}
+
+  renderLoginOrConsent(client, authorizationId);
+}}
+
+async function renderLoginOrConsent(client, authorizationId) {{
+  // Login form lands in LFC-STORY-005-002; the consent screen itself is
+  // built in LFC-STORY-005-003. Once a session exists, this only shows a
+  // generic loading state until that story fills in the real
+  // getAuthorizationDetails call.
+  const {{ data }} = await client.auth.getSession();
+
+  if (!data.session) {{
+    lifecoachRenderLoginForm(client, authorizationId);
+    return;
+  }}
+
   lifecoachRenderLoadingState();
 }}
 
@@ -107,14 +185,16 @@ def render_oauth_consent_page(supabase_url: str, supabase_anon_key: str) -> str:
     still injected via an escaped JS string literal rather than interpolated
     as raw HTML.
 
-    This story only implements:
+    Implements, across LFC-STORY-005-001 and LFC-STORY-005-002:
     - The page shell and the pinned-version `supabase-js` CDN script tag.
     - The missing-`authorization_id` failure state.
-    - A `renderLoginOrConsent` stub showing a generic loading state when
-      `authorization_id` is present — the real login form
-      (LFC-STORY-005-002) and consent screen (LFC-STORY-005-003) replace
-      that stub's body in later stories without needing this shell to
-      change.
+    - A session check: if no active Supabase session exists, an
+      email/password login form is rendered and wired to
+      `signInWithPassword`, with a generic invalid-credentials error on
+      failure and no page reload required to retry. If a session exists
+      (or is just established by a successful login), the page shows a
+      generic loading state, a stub the consent screen (LFC-STORY-005-003)
+      replaces without needing this shell to change.
     """
     script = _SCRIPT_TEMPLATE.format(
         supabase_url=_escape_js_string(supabase_url),

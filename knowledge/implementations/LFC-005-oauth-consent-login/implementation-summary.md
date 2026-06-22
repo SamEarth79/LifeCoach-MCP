@@ -79,3 +79,66 @@ baseline carried over from LFC-004-mcp-ui-home-goal-views). See
 `test-results.md` for the full breakdown per acceptance criterion, including
 the hostile-input escaping verification detail and the explicit
 out-of-scope-E2E caveat per `requirements.md`.
+
+## LFC-STORY-005-002: Login form authenticates existing users via the Supabase client SDK
+
+**What was implemented:** `app/oauth_consent.py` extended with
+`lifecoachRenderLoginForm(client, authorizationId)` (renders an
+email/password form with a hidden error placeholder, no signup/
+account-creation link) and `lifecoachHandleLoginSubmit(client,
+authorizationId)` (calls `client.auth.signInWithPassword({ email, password
+})`; on error, sets a single fixed generic `"Invalid email or password."`
+message with no field- or account-existence-specific variant; on success,
+re-invokes `renderLoginOrConsent` rather than navigating away). The existing
+`renderLoginOrConsent` (previously a stub) now calls
+`client.auth.getSession()` first and only renders the login form when there
+is no active session, otherwise falling through to the existing
+loading-state stub left for LFC-STORY-005-003 to replace with the real
+consent screen.
+
+**What was tested and why:** Read the full current `app/oauth_consent.py`
+before writing any test. Per `rules/testing.md`, this is new non-trivial
+conditional-rendering/state-transition logic, so unit tests were required.
+Feature tests were judged **not required**: this story adds no new HTTP
+route or server-side behavior — the existing `GET /oauth/consent` feature
+tests from story 001 already cover the route's request/response contract,
+and this story's actual behavior (form interaction, SDK call wiring) lives
+entirely in client-side JS with no additional HTTP-layer surface to
+exercise. E2E (Playwright) was **not** written, for the same reason as
+story 001: no live Supabase deployment exists yet to test the real
+`signInWithPassword` wire contract against, and a test against a mocked
+backend would only prove self-consistency with the same assumption already
+baked into the implementation — flagged explicitly as an unverified
+external-contract assumption in `test-results.md` rather than silently
+passed.
+
+- **Unit tests** (`tests/unit/test_oauth_consent.py`, 10 new tests added to
+  the existing file): the no-session path renders the login form
+  (email + password fields only, no signup link); the form's submit handler
+  calls `preventDefault()` then `lifecoachHandleLoginSubmit`;
+  `signInWithPassword` is called with `{ email, password }` read from the
+  two input elements; success calls `renderLoginOrConsent` again rather
+  than redirecting; failure shows exactly one generic error string anywhere
+  in the page, with explicit negative assertions ruling out
+  field-specific/account-existence-revealing variants
+  (`"email not found"`, `"no such user"`, `"wrong password"`, etc.); the
+  failure path never reassigns `window.location` or tears down the form
+  (`.remove(`/`.innerHTML`), only updates the error text — so the user can
+  retry without a reload; the `email`/`password` variables are never
+  logged (`console.*`) or echoed anywhere outside the `signInWithPassword`
+  call itself; a whole-file grep plus a dedicated regression test confirm
+  no "sign up"/"signup"/"create account"/"register" text exists anywhere on
+  the page; and a symmetric case confirms an active session skips the
+  login form and falls through to the loading state.
+- The single-generic-error-message requirement (this repo's established
+  no-account-enumeration discipline) was verified by asserting both the
+  presence of the correct generic string and the explicit absence of any
+  more specific alternative — not just that *a* message appears.
+
+**Test results:** 10 new unit tests, 233/233 full suite passing across two
+consecutive runs with no flakiness (up from the 223 baseline after
+LFC-STORY-005-001). No feature or E2E tests were added — see
+`test-results.md` for the full per-acceptance-criterion breakdown, the
+security-review detail on the no-enumeration error handling, and the
+explicitly flagged unverified `signInWithPassword` wire-contract assumption
+(`PASS WITH CAVEATS`).
