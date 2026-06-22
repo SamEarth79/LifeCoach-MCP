@@ -7,7 +7,6 @@ import pytest
 
 from app import mcp_server
 from app.auth import CurrentUser
-from mcp.types import EmbeddedResource
 
 USER_ID = "11111111-1111-1111-1111-111111111111"
 GOAL_ID = "33333333-3333-3333-3333-333333333333"
@@ -543,7 +542,7 @@ def _patch_db_sequenced(monkeypatch, responses):
 
 
 @pytest.mark.asyncio
-async def test_get_home_view_returns_embedded_resource_with_greeting_and_goal_cards(monkeypatch):
+async def test_get_home_view_returns_dict_with_greeting_and_goal_cards(monkeypatch):
     user_row = ("Sam", "sam@example.com")
     goal_rows = [(GOAL_ID, "Run a 5k", 42)]
     last_updated_rows = [(GOAL_ID, CREATED_AT)]
@@ -555,11 +554,10 @@ async def test_get_home_view_returns_embedded_resource_with_greeting_and_goal_ca
 
     result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert result.resource.uri.scheme == "ui"
-    assert result.resource.mimeType == "text/html"
-    assert "Sam" in result.resource.text
-    assert "Run a 5k" in result.resource.text
+    assert isinstance(result, dict)
+    assert result["greetingName"] == "Sam"
+    assert result["goals"][0]["title"] == "Run a 5k"
+    assert result["error"] is None
     assert captured["user_id"] == USER_ID
 
 
@@ -572,7 +570,7 @@ async def test_get_home_view_falls_back_to_email_when_no_display_name(monkeypatc
 
     result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    assert "sam@example.com" in result.resource.text
+    assert result["greetingName"] == "sam@example.com"
 
 
 @pytest.mark.asyncio
@@ -584,8 +582,7 @@ async def test_get_home_view_returns_empty_state_for_zero_active_goals(monkeypat
 
     result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    assert 'class="card"' not in result.resource.text
-    assert "Create a new goal" in result.resource.text
+    assert result["goals"] == []
 
 
 @pytest.mark.asyncio
@@ -619,9 +616,7 @@ async def test_get_home_view_renders_no_estimate_yet_when_progress_percent_is_nu
 
     result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    body = result.resource.text.split("<body>")[1]
-    assert "no-estimate" in body
-    assert "0%" not in body
+    assert result["goals"][0]["progressPercent"] is None
 
 
 @pytest.mark.asyncio
@@ -665,13 +660,13 @@ async def test_get_home_view_returns_failure_resource_when_user_row_missing(monk
 
     result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert 'class="card"' not in result.resource.text
-    assert "couldn" in result.resource.text.lower()
+    assert isinstance(result, dict)
+    assert result["goals"] == []
+    assert "couldn" in (result.get("error") or "").lower()
 
 
 @pytest.mark.asyncio
-async def test_get_home_view_returns_failure_resource_on_unhandled_db_error_instead_of_raising(monkeypatch):
+async def test_get_home_view_returns_failure_dict_on_unhandled_db_error_instead_of_raising(monkeypatch):
     class _BoomCursor:
         async def execute(self, *_args, **_kwargs):
             raise RuntimeError("db exploded")
@@ -696,9 +691,9 @@ async def test_get_home_view_returns_failure_resource_on_unhandled_db_error_inst
 
     result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert 'class="card"' not in result.resource.text
-    assert "couldn" in result.resource.text.lower()
+    assert isinstance(result, dict)
+    assert result["goals"] == []
+    assert result.get("error") is not None
 
 
 def test_get_home_view_tool_description_mentions_home_screen():
@@ -721,14 +716,12 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
 
     result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert result.resource.uri.scheme == "ui"
-    assert result.resource.mimeType == "text/html"
-    assert "Run a 5k" in result.resource.text
-    assert "Train three times a week" in result.resource.text
-    assert "42%" in result.resource.text
-    assert "Ran 3 miles today" in result.resource.text
-    assert "transcript" not in result.resource.text.lower()
+    assert isinstance(result, dict)
+    assert result["title"] == "Run a 5k"
+    assert result["description"] == "Train three times a week"
+    assert result["progressPercent"] == 42
+    assert result["recentUpdates"][0]["content"] == "Ran 3 miles today"
+    assert "transcript" not in str(result).lower()
     assert captured["user_id"] == USER_ID
 
 
@@ -758,7 +751,7 @@ async def test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_e
 
     result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
-    assert "No updates yet." in result.resource.text
+    assert result["recentUpdates"] == []
 
 
 @pytest.mark.asyncio
@@ -770,9 +763,7 @@ async def test_get_goal_detail_view_renders_no_estimate_yet_when_progress_percen
 
     result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
-    body = result.resource.text.split("<body>")[1]
-    assert "no-estimate" in body
-    assert "0%" not in body
+    assert result["progressPercent"] is None
 
 
 @pytest.mark.asyncio
@@ -783,12 +774,11 @@ async def test_get_goal_detail_view_returns_failure_resource_when_goal_row_missi
 
     result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert "Run a 5k" not in result.resource.text
-    assert "isn't available" in result.resource.text or "isn&#x27;t available" in result.resource.text
+    assert isinstance(result, dict)
+    assert result.get("error") is not None
+    assert "isn't available" in result["error"].lower()
     # Only one query (the goal lookup) was attempted — no second query for
-    # updates is issued once the goal row comes back empty, and crucially
-    # no title/progress/updates section is rendered alongside the error.
+    # updates is issued once the goal row comes back empty.
     assert len(fake_connection.cursor_instance.executed) == 1
 
 
@@ -820,9 +810,9 @@ async def test_get_goal_detail_view_returns_failure_resource_on_unhandled_db_err
 
     result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert "Run a 5k" not in result.resource.text
-    assert "isn't available" in result.resource.text or "isn&#x27;t available" in result.resource.text
+    assert isinstance(result, dict)
+    assert result.get("error") is not None
+    assert "isn't available" in result["error"].lower()
 
 
 @pytest.mark.asyncio
@@ -908,20 +898,6 @@ def test_get_goal_detail_view_tool_description_mentions_goal_detail():
     description = tool.description.lower()
 
     assert "detail" in description
-
-
-def test_build_embedded_html_resource_helper_used_by_both_home_and_detail_view_builders():
-    # Regression guard on the refactor: both resource builders must route
-    # through the same shared helper rather than constructing
-    # EmbeddedResource/TextResourceContents independently, so a future
-    # change to the wrapping shape only needs to happen in one place.
-    import inspect
-
-    home_source = inspect.getsource(mcp_server._build_home_view_resource)
-    detail_source = inspect.getsource(mcp_server._build_goal_detail_view_resource)
-
-    assert "_build_embedded_html_resource" in home_source
-    assert "_build_embedded_html_resource" in detail_source
 
 
 class _DeleteThenRefreshCursor:
@@ -1125,19 +1101,14 @@ async def test_delete_goal_on_success_returns_refreshed_home_view_resource_exclu
 
     result = await mcp_server.delete_goal(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
-    assert isinstance(result, EmbeddedResource)
-    assert str(result.resource.uri) == "ui://home-view"
-    assert result.resource.mimeType == "text/html"
-    assert "Read a book" in result.resource.text
-    assert GOAL_ID not in result.resource.text
+    assert isinstance(result, dict)
+    assert "Read a book" in str(result)
+    assert GOAL_ID not in str(result)
     assert captured["user_id"] == USER_ID
 
 
 @pytest.mark.asyncio
-async def test_delete_goal_returns_same_resource_shape_as_get_home_view(monkeypatch):
-    # Confirms delete_goal's success path reuses the exact same
-    # ui://home-view resource shape get_home_view itself produces (same
-    # URI, same mimetype), not an ad-hoc shape built independently.
+async def test_delete_goal_returns_same_dict_shape_as_get_home_view(monkeypatch):
     delete_row = (GOAL_ID,)
     refresh_responses = [("Sam", "sam@example.com"), [], None]
     _patch_db_for_delete(monkeypatch, delete_row, refresh_responses)
@@ -1151,23 +1122,18 @@ async def test_delete_goal_returns_same_resource_shape_as_get_home_view(monkeypa
 
     home_view_result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
 
-    assert delete_result.resource.uri == home_view_result.resource.uri
-    assert delete_result.resource.mimeType == home_view_result.resource.mimeType
+    assert set(delete_result.keys()) == set(home_view_result.keys())
     assert type(delete_result) is type(home_view_result)
 
 
 @pytest.mark.asyncio
 async def test_delete_goal_success_path_uses_shared_fetch_home_view_data_helper(monkeypatch):
-    # Regression guard on the extraction: delete_goal's refresh must route
-    # through the same `_fetch_home_view_data` helper get_home_view uses,
-    # not a parallel ad-hoc query, so the two views can never silently
-    # diverge.
     import inspect
 
     delete_source = inspect.getsource(mcp_server.delete_goal)
 
     assert "_fetch_home_view_data" in delete_source
-    assert "_build_home_view_resource" in delete_source
+    assert "home_view_data_to_dict" in delete_source
 
 
 def test_delete_goal_tool_description_states_called_from_ui_confirm_step_not_proactive():
@@ -1178,3 +1144,84 @@ def test_delete_goal_tool_description_states_called_from_ui_confirm_step_not_pro
     assert "confirm" in description
     assert "not" in description
     assert "proactively" in description or "mid-conversation" in description
+
+
+@pytest.mark.asyncio
+async def test_home_view_resource_is_registered_under_ui_home_view_uri():
+    resources = await mcp_server.mcp.list_resources()
+    resource_uris = {str(resource.uri) for resource in resources}
+
+    assert "ui://home-view" in resource_uris
+
+
+@pytest.mark.asyncio
+async def test_goal_detail_view_resource_is_registered_under_ui_goal_detail_view_uri():
+    resources = await mcp_server.mcp.list_resources()
+    resource_uris = {str(resource.uri) for resource in resources}
+
+    assert "ui://goal-detail-view" in resource_uris
+
+
+@pytest.mark.asyncio
+async def test_home_view_resource_has_mcp_app_html_mime_type():
+    resources = await mcp_server.mcp.list_resources()
+    home_resource = next(r for r in resources if str(r.uri) == "ui://home-view")
+
+    assert home_resource.mimeType == "text/html;profile=mcp-app"
+
+
+@pytest.mark.asyncio
+async def test_goal_detail_view_resource_has_mcp_app_html_mime_type():
+    resources = await mcp_server.mcp.list_resources()
+    detail_resource = next(r for r in resources if str(r.uri) == "ui://goal-detail-view")
+
+    assert detail_resource.mimeType == "text/html;profile=mcp-app"
+
+
+@pytest.mark.asyncio
+async def test_home_view_resource_function_returns_render_home_view_output():
+    from app.ui_templates import render_home_view
+
+    result = await mcp_server.home_view_resource()
+
+    assert result == render_home_view()
+
+
+@pytest.mark.asyncio
+async def test_goal_detail_view_resource_function_returns_render_goal_detail_view_output():
+    from app.ui_templates import render_goal_detail_view
+
+    result = await mcp_server.goal_detail_view_resource()
+
+    assert result == render_goal_detail_view()
+
+
+def test_get_home_view_tool_declares_ui_resource_uri_in_meta():
+    tool = mcp_server.mcp._tool_manager._tools["get_home_view"]
+
+    assert tool.meta == {"ui": {"resourceUri": "ui://home-view"}}
+
+
+def test_get_goal_detail_view_tool_declares_ui_resource_uri_in_meta():
+    tool = mcp_server.mcp._tool_manager._tools["get_goal_detail_view"]
+
+    assert tool.meta == {"ui": {"resourceUri": "ui://goal-detail-view"}}
+
+
+def test_delete_goal_tool_declares_home_view_ui_resource_uri_in_meta():
+    # delete_goal returns a refreshed home-view dict (not a goal-detail
+    # dict) on success, so its UI resource link intentionally points at
+    # ui://home-view, the same resource get_home_view declares — not at
+    # ui://goal-detail-view.
+    tool = mcp_server.mcp._tool_manager._tools["delete_goal"]
+
+    assert tool.meta == {"ui": {"resourceUri": "ui://home-view"}}
+
+
+def test_record_update_set_goal_progress_and_list_updates_tools_have_no_ui_meta():
+    # Only the three tools that return view dicts declare a UI resource
+    # link; record_update/list_updates/set_goal_progress are not rendered
+    # by a UI template and must not carry stale or accidental _meta.
+    for tool_name in ("record_update", "list_updates", "set_goal_progress"):
+        tool = mcp_server.mcp._tool_manager._tools[tool_name]
+        assert tool.meta is None or "ui" not in tool.meta

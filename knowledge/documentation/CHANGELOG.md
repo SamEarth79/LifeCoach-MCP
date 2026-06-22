@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file, following
 
 ## Unreleased
 
+### Fixed
+
+- MCP-UI rendering (LFC-004): the home and goal-detail screens did not
+  actually render as interactive widgets in a real MCP-UI host (Claude
+  Desktop read the returned HTML as plain text and summarized it in chat
+  instead). Re-architected to follow the MCP Apps / SEP-1865 spec: the UI
+  templates are now registered as discoverable resources
+  (`ui://home-view`, `ui://goal-detail-view`) loaded once by the host, the
+  `get_home_view`/`get_goal_detail_view`/`delete_goal` tools declare which
+  resource renders their result and now return structured data instead of
+  HTML, and that data is rendered client-side inside the already-loaded
+  widget. Confirmed working as an actual interactive widget against a real
+  Claude Desktop client.
+- Fixed an XSS regression introduced during that re-architecture: the
+  goal-detail screen's "continue this conversation" button interpolated an
+  HTML-escaped but still attacker-controlled goal title directly into a
+  JavaScript string literal inside an `onclick` attribute, which a hostile
+  title could break out of (browsers HTML-decode attribute values before
+  the JS engine parses them). The title is now read back from escaped DOM
+  text content at click time instead of being interpolated into the script.
+
 ### Added
 
 - MCP-UI home and goal-detail views (LFC-004): two interactive screens

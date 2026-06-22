@@ -2,7 +2,7 @@ import logging
 from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import EmbeddedResource, TextResourceContents
+
 from pydantic import ValidationError
 
 from app.auth import verify_bearer_token
@@ -15,6 +15,8 @@ from app.ui_templates import (
     GoalDetailViewData,
     HomeGoalCard,
     HomeViewData,
+    goal_detail_data_to_dict,
+    home_view_data_to_dict,
     render_goal_detail_view,
     render_home_view,
 )
@@ -24,6 +26,24 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 mcp = FastMCP("lifecoach", streamable_http_path="/")
+
+
+@mcp.resource(
+    uri="ui://home-view",
+    mime_type="text/html;profile=mcp-app",
+    name="LifeCoach Home View",
+)
+async def home_view_resource() -> str:
+    return render_home_view()
+
+
+@mcp.resource(
+    uri="ui://goal-detail-view",
+    mime_type="text/html;profile=mcp-app",
+    name="LifeCoach Goal Detail View",
+)
+async def goal_detail_view_resource() -> str:
+    return render_goal_detail_view()
 
 
 @mcp.tool(
@@ -181,27 +201,6 @@ async def set_goal_progress(
     }
 
 
-def _build_embedded_html_resource(uri: str, html_text: str) -> EmbeddedResource:
-    return EmbeddedResource(
-        type="resource",
-        resource=TextResourceContents(
-            uri=uri,
-            mimeType="text/html",
-            text=html_text,
-        ),
-    )
-
-
-def _build_home_view_resource(data: HomeViewData) -> EmbeddedResource:
-    return _build_embedded_html_resource("ui://home-view", render_home_view(data))
-
-
-def _build_goal_detail_view_resource(data: GoalDetailViewData) -> EmbeddedResource:
-    return _build_embedded_html_resource(
-        "ui://goal-detail-view", render_goal_detail_view(data)
-    )
-
-
 async def _fetch_home_view_data(user_id: str) -> HomeViewData:
     async with get_rls_connection(user_id) as conn:
         async with conn.cursor() as cursor:
@@ -273,7 +272,7 @@ async def _fetch_home_view_data(user_id: str) -> HomeViewData:
         "— use list_updates/other tools for that."
     )
 )
-async def get_home_view(ctx: Context) -> EmbeddedResource:
+async def get_home_view(ctx: Context) -> dict:
     request = ctx.request_context.request
     await enforce_mcp_rate_limit(request)
 
@@ -284,15 +283,13 @@ async def get_home_view(ctx: Context) -> EmbeddedResource:
         home_view_data = await _fetch_home_view_data(current_user.id)
     except Exception:
         logger.exception("get_home_view failed for caller %s", current_user.id)
-        return _build_home_view_resource(
-            HomeViewData(
-                greeting_name=None,
-                goals=[],
-                error="We couldn't load your home screen right now.",
-            )
-        )
+        return {
+            "greetingName": None,
+            "goals": [],
+            "error": "We couldn't load your home screen right now.",
+        }
 
-    return _build_home_view_resource(home_view_data)
+    return home_view_data_to_dict(home_view_data)
 
 
 @mcp.tool(
@@ -305,7 +302,7 @@ async def get_home_view(ctx: Context) -> EmbeddedResource:
         "your own reasoning — use list_updates/other tools for that."
     )
 )
-async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
+async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
     request = ctx.request_context.request
     await enforce_mcp_rate_limit(request)
 
@@ -332,7 +329,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
                 goal_row = await cursor.fetchone()
 
                 if goal_row is None:
-                    return _build_goal_detail_view_resource(
+                    return goal_detail_data_to_dict(
                         GoalDetailViewData(
                             id=None,
                             title=None,
@@ -358,7 +355,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
                 update_rows = await cursor.fetchall()
     except Exception:
         logger.exception("get_goal_detail_view failed for caller %s", current_user.id)
-        return _build_goal_detail_view_resource(
+        return goal_detail_data_to_dict(
             GoalDetailViewData(
                 id=None,
                 title=None,
@@ -374,7 +371,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
         for content, created_at in update_rows
     ]
 
-    return _build_goal_detail_view_resource(
+    return goal_detail_data_to_dict(
         GoalDetailViewData(
             id=str(returned_id),
             title=title,
@@ -394,7 +391,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> EmbeddedResource:
         "refreshed home screen UI resource reflecting the deletion."
     )
 )
-async def delete_goal(goal_id: str, ctx: Context) -> EmbeddedResource:
+async def delete_goal(goal_id: str, ctx: Context) -> dict:
     request = ctx.request_context.request
     await enforce_mcp_rate_limit(request)
 
@@ -429,12 +426,15 @@ async def delete_goal(goal_id: str, ctx: Context) -> EmbeddedResource:
         home_view_data = await _fetch_home_view_data(current_user.id)
     except Exception:
         logger.exception("delete_goal: refreshing home view failed for caller %s", current_user.id)
-        return _build_home_view_resource(
-            HomeViewData(
-                greeting_name=None,
-                goals=[],
-                error="We couldn't load your home screen right now.",
-            )
-        )
+        return {
+            "greetingName": None,
+            "goals": [],
+            "error": "We couldn't load your home screen right now.",
+        }
 
-    return _build_home_view_resource(home_view_data)
+    return home_view_data_to_dict(home_view_data)
+
+
+mcp._tool_manager._tools["get_home_view"].meta = {"ui": {"resourceUri": "ui://home-view"}}
+mcp._tool_manager._tools["get_goal_detail_view"].meta = {"ui": {"resourceUri": "ui://goal-detail-view"}}
+mcp._tool_manager._tools["delete_goal"].meta = {"ui": {"resourceUri": "ui://home-view"}}

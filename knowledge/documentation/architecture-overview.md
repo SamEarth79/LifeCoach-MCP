@@ -168,63 +168,83 @@ This is a same-process mount, not a separate service:
   feature's test results — must be addressed before production deployment
   behind a reverse proxy.
 
-### UI-rendering layer: server-rendered HTML over MCP, not just structured tool results
+### UI-rendering layer: MCP Apps (SEP-1865) — registered resources + structured tool data, rendered client-side
 
 Starting with the home and goal-detail views (LFC-004), some MCP tools
 (`get_home_view`, `get_goal_detail_view`, and `delete_goal`'s success path)
-return rendered HTML content instead of a plain JSON-like tool result —
-this is the first feature where the MCP surface produces actual UI rather
-than data for an LLM to reason over.
+have an associated rendered UI — this is the first feature where the MCP
+surface produces actual UI rather than data for an LLM to reason over.
+
+The original implementation returned a complete server-rendered HTML
+document as an `EmbeddedResource` directly from each tool call. Live
+testing against a real Claude Desktop client (post-merge) showed this
+never rendered as an interactive widget at all — the host read the HTML as
+plain text and summarized it in the chat transcript. It was replaced with
+the **MCP Apps / SEP-1865** pattern
+(https://github.com/modelcontextprotocol/ext-apps), confirmed working
+against a real host:
 
 ```
-            ┌───────────────┐
-  MCP host  │  FastMCP app  │ → app/ui_templates.py renders HTML
- (renders   │ (app/mcp_     │   from a plain dataclass (HomeViewData /
-  the HTML  │  server.py)   │   GoalDetailViewData), server-side, no
-  in an     └──────┬────────┘   client JS framework
-  iframe/        EmbeddedResource(uri="ui://...", mimeType="text/html")
-  webview) ←───────┘
+            ┌───────────────┐  1. host loads ui://home-view /
+  MCP host  │  FastMCP app  │     ui://goal-detail-view once, up front
+ (loads UI  │ (app/mcp_     │     (static HTML + inline JS bridge)
+ resource   │  server.py)   │
+  once,     └──────┬────────┘  2. tool call returns structured dict,
+  renders        tools/call →     not HTML — host renders it inside the
+  inside it) ←── dict result      already-loaded resource via postMessage
 ```
 
-- **Server-side rendering, no client build step.** `app/ui_templates.py`
-  generates complete standalone HTML documents (inline `<style>` and
-  `<script>`) as plain Python string templates from typed dataclasses
-  (`HomeGoalCard`/`HomeViewData`, `GoalDetailUpdate`/`GoalDetailViewData`).
-  There is no separate frontend framework, bundler, or TypeScript helper
-  SDK — matching `strategy.md`'s "light UI needs" direction. Every
-  user-controlled string (names, titles, descriptions, update content,
-  error messages) is passed through `html.escape` before interpolation;
-  this is the same XSS-escaping discipline already applied at every other
-  user-input boundary in this repo, just applied to a new output context
-  (HTML rendered for an embedded view rather than a JSON API response).
-- **The `EmbeddedResource` wrapping mechanism.** `app/mcp_server.py`'s
-  `_build_embedded_html_resource(uri, html_text)` wraps the rendered HTML
-  in `EmbeddedResource(type="resource", resource=TextResourceContents(uri=...,
-  mimeType="text/html", text=...))` — types imported directly from the
-  installed `mcp` SDK (`mcp.types`), not hand-rolled. This is the standard
-  MCP mechanism for a tool to return renderable content (as opposed to a
-  plain dict/list result) to a host capable of displaying it; confirmed to
-  actually parse/serialize correctly through the installed SDK rather than
-  assumed from documentation alone.
-- **Interaction model: two `postMessage` intents.** The rendered HTML's
-  inline JS sends `window.parent.postMessage(...)` with one of two payload
-  shapes: `{type: "tool", payload: {toolName, params}}` (direct tool
-  invocation — used for goal-card-click navigation and the delete-confirm
-  action) or `{type: "prompt", payload: {prompt}}` (chat-message injection
-  — used for "create a new goal," "just want to talk," and "continue this
-  conversation"). The split matches `strategy.md`: creation/conversation
-  stay conversational, navigation/structured actions are direct tool
-  calls.
-- **Known architectural risk: the `postMessage` tool-invocation shape is
-  unverified against any live MCP-UI host.** No real MCP-UI host was
-  available in any implementation sandbox for this feature. Every direct
-  tool-invocation interaction this feature ships rests on an assumption
-  about the host-side `postMessage` convention that has not been confirmed
-  against the actual MCP-UI spec or a real host. If unsupported, every
-  such interaction must fall back to the chat-message-injection shape
-  instead — a potential rework of this layer's interaction model, not a
-  minor fix. Tracked in
-  `knowledge/documentation/LFC-004-mcp-ui-home-goal-views/technical-doc.md`.
+- **UI templates are registered as discoverable MCP resources, loaded once
+  by the host.** `app/mcp_server.py` registers
+  `@mcp.resource(uri="ui://home-view", mime_type="text/html;profile=mcp-app")`
+  and the equivalent `ui://goal-detail-view` resource; each returns a
+  static HTML document from `app/ui_templates.py` (`render_home_view()`/
+  `render_goal_detail_view()`, now zero-argument functions — the same
+  document every time, with no per-user data baked in).
+- **Tools declare their associated UI via `_meta`.** FastMCP's `@mcp.tool`
+  decorator has no first-class `_meta` parameter, so each of the three
+  tools' registered `Tool` object has `.meta = {"ui": {"resourceUri":
+  "..."}}` set directly at module load time. `delete_goal` intentionally
+  points at `ui://home-view`, not `ui://goal-detail-view`, since it returns
+  a refreshed home view on success.
+- **Tool calls return structured data, not HTML.** `get_home_view`,
+  `get_goal_detail_view`, and `delete_goal` all return a plain `dict`
+  (camelCase keys, via `home_view_data_to_dict`/`goal_detail_data_to_dict`
+  in `app/ui_templates.py`) instead of an `EmbeddedResource`. The
+  `None`-vs-`0` progress distinction and error-takes-precedence contract
+  from the original dataclasses are preserved unchanged in the dict
+  conversion.
+- **Rendering moved client-side.** The two registered resources' HTML
+  contains an inline JS bridge implementing the `ui/initialize` handshake
+  and exposing `window.callTool`/`window.sendMessage` (JSON-RPC-over-
+  `postMessage`), plus inline rendering JS (`renderHomeView`/
+  `renderGoalDetailView`/`goalCard`/a client-side `escapeHtml`) that builds
+  the same HTML structure the old server-side Python templates produced,
+  now executed inside the rendered widget against the structured dict a
+  tool call returns. Every user-controlled string (names, titles,
+  descriptions, update content, error messages) is still escaped — just by
+  the client-side `escapeHtml` now, confirmed to cover the same five
+  characters in the same order as Python's `html.escape`.
+- **A real XSS regression was found and fixed during this migration.** The
+  goal-detail screen's "continue this conversation" button briefly
+  interpolated an HTML-escaped-but-still-attacker-controlled goal title
+  directly into a JS string literal inside an `onclick` attribute —
+  exploitable because browsers HTML-decode attribute values before the JS
+  engine parses the handler, so HTML-escaping alone doesn't stop a hostile
+  title from breaking out of the string. Fixed to interpolate only the
+  trusted goal UUID into `onclick` and read the title back from escaped DOM
+  `textContent` at click time, mirroring the pattern the original
+  server-rendered template already used for the same button. See
+  `knowledge/documentation/LFC-004-mcp-ui-home-goal-views/technical-doc.md`
+  for the full writeup.
+- **Resolved risk: the `postMessage` interaction model is now confirmed
+  against a real host.** Unlike the original implementation (untested
+  against any live MCP-UI host), this re-architecture was directly
+  confirmed by the user to render and function as an interactive widget in
+  real Claude Desktop — the previously-open question of whether direct
+  tool invocation from a UI click is supported is resolved (yes, via this
+  JSON-RPC-over-`postMessage` bridge, not the original ad-hoc `{type:
+  "tool"/"prompt", payload: {...}}` shape, which was never validated).
 
 ### Soft delete as an RLS-enforced pattern
 

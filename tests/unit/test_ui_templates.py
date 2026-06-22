@@ -1,17 +1,29 @@
-"""Unit tests for the home-view HTML renderer in `app.ui_templates`.
+"""Unit tests for `app.ui_templates` under the MCP Apps (SEP-1865)
+architecture: `render_home_view`/`render_goal_detail_view` return a static
+HTML template containing client-side rendering JS — they take no data
+argument, so server-side HTML output can no longer be asserted against
+data inputs. Rendering itself now happens in the browser; these tests can
+only assert against the JS *source* (function presence, structure, and the
+escaping logic itself), not its executed output.
 
-These exercise `render_home_view` directly against `HomeViewData`/
-`HomeGoalCard` inputs with no DB/MCP/auth involved — see
-`tests/unit/test_mcp_server.py` for the tool-logic layer that constructs
-this data, and `tests/feature/test_mcp_get_home_view.py` for the
-wire-protocol layer.
+`home_view_data_to_dict`/`goal_detail_data_to_dict` remain real Python
+logic (camelCase mapping or the data the client renders) and are tested
+thoroughly here, the same way the old suite tested server-side rendering.
+
+See `tests/unit/test_mcp_server.py` for the tool-logic layer that builds
+the dataclasses these helpers convert, and
+`tests/feature/test_mcp_get_home_view.py` etc. for the wire-protocol layer.
 """
+
+import re
 
 from app.ui_templates import (
     GoalDetailUpdate,
     GoalDetailViewData,
     HomeGoalCard,
     HomeViewData,
+    goal_detail_data_to_dict,
+    home_view_data_to_dict,
     render_goal_detail_view,
     render_home_view,
 )
@@ -28,426 +40,518 @@ def _card(**overrides):
     return HomeGoalCard(**defaults)
 
 
-def test_render_home_view_escapes_xss_payload_in_greeting_name():
-    payload = "<script>alert(1)</script>"
-    data = HomeViewData(greeting_name=payload, goals=[])
-
-    html_output = render_home_view(data)
-
-    assert "<script>alert(1)</script>" not in html_output
-    assert "&lt;script&gt;" in html_output
+# ---------------------------------------------------------------------------
+# render_home_view / render_goal_detail_view: static template + JS bridge
+# ---------------------------------------------------------------------------
 
 
-def test_render_home_view_escapes_xss_payload_in_goal_card_title():
-    payload = "<script>alert(1)</script>"
-    data = HomeViewData(greeting_name="Sam", goals=[_card(title=payload)])
+def test_render_home_view_takes_no_arguments():
+    import inspect
 
-    html_output = render_home_view(data)
+    signature = inspect.signature(render_home_view)
 
-    assert "<script>alert(1)</script>" not in html_output
-    assert "&lt;script&gt;" in html_output
+    assert len(signature.parameters) == 0
 
 
-def test_render_home_view_escapes_xss_payload_in_error_message():
-    payload = "<script>alert(1)</script>"
-    data = HomeViewData(greeting_name=None, goals=[], error=payload)
+def test_render_goal_detail_view_takes_no_arguments():
+    import inspect
 
-    html_output = render_home_view(data)
+    signature = inspect.signature(render_goal_detail_view)
 
-    assert "<script>alert(1)</script>" not in html_output
-    assert "&lt;script&gt;" in html_output
+    assert len(signature.parameters) == 0
 
 
-def test_render_home_view_renders_no_estimate_yet_for_none_progress_not_zero_percent():
+def test_render_home_view_returns_full_html_document():
+    html_output = render_home_view()
+
+    assert html_output.startswith("<!DOCTYPE html>")
+    assert "<html" in html_output
+    assert '<div class="page" id="root">' in html_output
+
+
+def test_render_goal_detail_view_returns_full_html_document():
+    html_output = render_goal_detail_view()
+
+    assert html_output.startswith("<!DOCTYPE html>")
+    assert "<html" in html_output
+    assert '<div class="page" id="root">' in html_output
+
+
+def test_render_home_view_is_deterministic_static_template():
+    assert render_home_view() == render_home_view()
+
+
+def test_render_goal_detail_view_is_deterministic_static_template():
+    assert render_goal_detail_view() == render_goal_detail_view()
+
+
+def test_render_home_view_includes_bridge_js_initialize_handshake():
+    html_output = render_home_view()
+
+    assert 'method: "ui/initialize"' in html_output
+    assert "window.parent.postMessage" in html_output
+    assert "window.callTool" in html_output
+    assert "window.sendMessage" in html_output
+
+
+def test_render_goal_detail_view_includes_bridge_js_initialize_handshake():
+    html_output = render_goal_detail_view()
+
+    assert 'method: "ui/initialize"' in html_output
+    assert "window.parent.postMessage" in html_output
+    assert "window.callTool" in html_output
+    assert "window.sendMessage" in html_output
+
+
+def test_render_home_view_includes_render_functions():
+    html_output = render_home_view()
+
+    assert "function renderHomeView(" in html_output
+    assert "function renderGoalDetailView(" in html_output
+    assert "function escapeHtml(" in html_output
+    assert "function goalCard(" in html_output
+
+
+def test_render_goal_detail_view_includes_render_functions():
+    html_output = render_goal_detail_view()
+
+    assert "function renderHomeView(" in html_output
+    assert "function renderGoalDetailView(" in html_output
+    assert "function escapeHtml(" in html_output
+
+
+def test_render_home_view_wires_tool_result_callback_to_render_home_view():
+    html_output = render_home_view()
+
+    assert "window.onToolResult" in html_output
+    callback_section = html_output.split("window.onToolResult")[1]
+    assert "renderHomeView(data)" in callback_section
+
+
+def test_render_goal_detail_view_wires_tool_result_callback_to_render_goal_detail_view():
+    html_output = render_goal_detail_view()
+
+    assert "window.onToolResult" in html_output
+    callback_section = html_output.split("window.onToolResult")[1]
+    assert "renderGoalDetailView(data)" in callback_section
+
+
+def test_render_home_view_has_no_tab_bar_or_streak_markup():
+    html_output = render_home_view().lower()
+
+    assert "tab-bar" not in html_output
+    assert "reflect" not in html_output
+    assert "journey" not in html_output
+    assert "current streak" not in html_output
+
+
+def test_render_goal_detail_view_has_no_tab_bar_or_streak_markup():
+    html_output = render_goal_detail_view().lower()
+
+    assert "tab-bar" not in html_output
+    assert "reflect" not in html_output
+    assert "journey" not in html_output
+    assert "current streak" not in html_output
+
+
+def test_render_home_view_never_mentions_transcript():
+    assert "transcript" not in render_home_view().lower()
+
+
+def test_render_goal_detail_view_never_mentions_transcript():
+    assert "transcript" not in render_goal_detail_view().lower()
+
+
+# ---------------------------------------------------------------------------
+# escapeHtml JS implementation: verify the five-character escaping discipline
+# migrated correctly from Python's html.escape into the client-side JS
+# ---------------------------------------------------------------------------
+
+
+def _extract_escape_html_body(html_output: str) -> str:
+    start = html_output.index("function escapeHtml(")
+    # Body runs from the first '{' after the signature to the matching '}'
+    # — escapeHtml is a short, single-level function, so a depth-aware scan
+    # from the opening brace is sufficient and avoids relying on exact
+    # surrounding formatting.
+    open_brace = html_output.index("{", start)
+    depth = 0
+    i = open_brace
+    while True:
+        if html_output[i] == "{":
+            depth += 1
+        elif html_output[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    return html_output[open_brace : i + 1]
+
+
+def test_escape_html_js_escapes_ampersand_first():
+    body = _extract_escape_html_body(render_home_view())
+
+    amp_idx = body.index("/&/g")
+    lt_idx = body.index("/</g")
+    assert amp_idx < lt_idx, "escaping & after < or > would double-escape entities"
+
+
+def test_escape_html_js_covers_all_five_html_special_characters():
+    body = _extract_escape_html_body(render_home_view())
+
+    assert "/&/g" in body
+    assert "/</g" in body
+    assert "/>/g" in body
+    assert '/"/g' in body
+    assert "/'/g" in body
+
+
+def test_escape_html_js_replacement_entities_match_python_html_escape():
+    import html as html_module
+
+    body = _extract_escape_html_body(render_home_view())
+
+    assert "&amp;amp;" not in body  # sanity: not double-escaping itself
+    assert "&amp;" in body
+    assert "&lt;" in body
+    assert "&gt;" in body
+    assert "&quot;" in body
+    assert "&#x27;" in body
+
+    # Cross-check against Python's html.escape, the prior server-side
+    # implementation, to confirm the replacement set is equivalent.
+    payload = """<script>alert('x & "y"')</script>"""
+    assert html_module.escape(payload) == (
+        "&lt;script&gt;alert(&#x27;x &amp; &quot;y&quot;&#x27;)&lt;/script&gt;"
+    )
+
+
+def test_escape_html_js_handles_non_string_input_without_throwing():
+    body = _extract_escape_html_body(render_home_view())
+
+    assert "typeof s !== 'string'" in body
+
+
+# ---------------------------------------------------------------------------
+# onclick interpolation discipline: only the server-generated UUID `id` may
+# be interpolated into a JS-execution (onclick) context. This is the same
+# property the prior server-rendered template enforced via
+# `lifecoachContinueGoal('{GOAL_ID}')`-style calls.
+# ---------------------------------------------------------------------------
+
+
+def _onclick_values(html_output: str) -> list[str]:
+    return re.findall(r'onclick="([^"]*)"', html_output)
+
+
+def test_goal_card_onclick_interpolates_only_safe_id_via_calltool():
+    html_output = render_home_view()
+    goal_card_fn = html_output[html_output.index("function goalCard(") :]
+    goal_card_fn = goal_card_fn[: goal_card_fn.index("\nfunction ", 1)]
+
+    onclick_segment = goal_card_fn[
+        goal_card_fn.index("onclick=") : goal_card_fn.index(")", goal_card_fn.index("onclick="))
+    ]
+
+    assert "window.callTool" in onclick_segment
+    assert "get_goal_detail_view" in onclick_segment
+    assert "safeId" in onclick_segment
+    assert "safeTitle" not in onclick_segment
+
+
+def test_render_goal_detail_view_delete_actions_interpolate_only_uuid_into_onclick():
+    html_output = render_goal_detail_view()
+    detail_fn_start = html_output.index("function renderGoalDetailView(")
+    detail_fn = html_output[detail_fn_start:]
+    detail_fn = detail_fn[: detail_fn.index("\nfunction renderGoalDetailError")]
+
+    assert "showDeleteConfirm(\\'' + safeId + '\\')" in detail_fn
+    assert "confirmDelete(\\'' + safeId + '\\')" in detail_fn
+    assert "cancelDeleteConfirm(\\'' + safeId + '\\')" in detail_fn
+
+
+def test_render_goal_detail_view_continue_button_interpolates_only_uuid_into_onclick():
+    """The continue-conversation button's onclick handler must only ever
+    interpolate the trusted server-generated UUID (`safeId`) into the
+    onclick JS-string context, never the free-text, user-controlled goal
+    title — same invariant already enforced for the delete actions.
+
+    HTML-escaping a title and then concatenating it into a single-quoted
+    JS string literal inside an `onclick` attribute is NOT safe: the
+    browser HTML-decodes attribute values before the JS engine parses the
+    onclick handler's source, so an escaped quote (`&#x27;`) decodes back
+    to a raw `'` at the point JS parses it, allowing a hostile title to
+    break out of the string and execute arbitrary script. The fix is to
+    pass only the UUID into onclick (`continueGoal('<uuid>')`) and have
+    that JS function read the already-escaped title back from the DOM via
+    `textContent` at click time, exactly like the old server-rendered
+    template did.
+    """
+    html_output = render_goal_detail_view()
+    detail_fn_start = html_output.index("function renderGoalDetailView(")
+    detail_fn = html_output[detail_fn_start:]
+    detail_fn = detail_fn[: detail_fn.index("\nfunction renderGoalDetailError")]
+
+    continue_button_line = next(
+        line for line in detail_fn.splitlines() if "continue-entry" in line
+    )
+
+    assert "safeTitle" not in continue_button_line
+    assert "continueGoal(\\'' + safeId + '\\')" in continue_button_line
+
+    assert "function continueGoal(goalId)" in html_output
+    continue_fn_start = html_output.index("function continueGoal(")
+    continue_fn = html_output[continue_fn_start : continue_fn_start + 300]
+    assert "textContent" in continue_fn
+    assert "window.sendMessage(" in continue_fn
+
+
+# ---------------------------------------------------------------------------
+# home_view_data_to_dict
+# ---------------------------------------------------------------------------
+
+
+def test_home_view_data_to_dict_maps_camel_case_fields():
+    data = HomeViewData(
+        greeting_name="Sam",
+        goals=[
+            _card(
+                id="11111111-1111-1111-1111-111111111111",
+                title="Run a 5k",
+                progress_percent=42,
+                last_updated_at="2026-06-15T10:00:00+00:00",
+            )
+        ],
+    )
+
+    result = home_view_data_to_dict(data)
+
+    assert result == {
+        "greetingName": "Sam",
+        "goals": [
+            {
+                "id": "11111111-1111-1111-1111-111111111111",
+                "title": "Run a 5k",
+                "progressPercent": 42,
+                "lastUpdatedAt": "2026-06-15T10:00:00+00:00",
+            }
+        ],
+        "error": None,
+    }
+
+
+def test_home_view_data_to_dict_preserves_none_progress_percent_not_coerced_to_zero():
     data = HomeViewData(greeting_name="Sam", goals=[_card(progress_percent=None)])
 
-    html_output = render_home_view(data)
-    body = html_output.split("<body>")[1]
+    result = home_view_data_to_dict(data)
 
-    assert "0%" not in body
-    assert "no-estimate" in body
+    assert result["goals"][0]["progressPercent"] is None
 
 
-def test_render_home_view_renders_real_percentage_text_for_numeric_progress():
-    data = HomeViewData(greeting_name="Sam", goals=[_card(progress_percent=42)])
-
-    html_output = render_home_view(data)
-
-    assert "42%" in html_output
-
-
-def test_render_home_view_renders_zero_percent_distinctly_from_no_estimate():
+def test_home_view_data_to_dict_preserves_zero_progress_percent_distinct_from_none():
     data = HomeViewData(greeting_name="Sam", goals=[_card(progress_percent=0)])
 
-    html_output = render_home_view(data)
-    body = html_output.split("<body>")[1]
+    result = home_view_data_to_dict(data)
 
-    assert "0%" in body
-    assert "no-estimate" not in body
+    assert result["goals"][0]["progressPercent"] == 0
 
 
-def test_render_home_view_shows_updated_line_when_last_updated_at_present():
+def test_home_view_data_to_dict_maps_multiple_goals_in_order():
     data = HomeViewData(
         greeting_name="Sam",
-        goals=[_card(last_updated_at="2026-06-15T10:00:00+00:00")],
+        goals=[
+            _card(id="11111111-1111-1111-1111-111111111111", title="Goal A"),
+            _card(id="22222222-2222-2222-2222-222222222222", title="Goal B"),
+        ],
     )
 
-    html_output = render_home_view(data)
+    result = home_view_data_to_dict(data)
 
-    assert "Updated" in html_output
-    assert "2026-06-15" in html_output
-
-
-def test_render_home_view_omits_updated_line_when_last_updated_at_is_none():
-    data = HomeViewData(greeting_name="Sam", goals=[_card(last_updated_at=None)])
-
-    html_output = render_home_view(data)
-
-    assert "Updated" not in html_output
+    assert [g["title"] for g in result["goals"]] == ["Goal A", "Goal B"]
 
 
-def test_render_home_view_empty_state_has_greeting_and_two_entries_no_cards():
+def test_home_view_data_to_dict_empty_goals_list():
     data = HomeViewData(greeting_name="Sam", goals=[])
 
-    html_output = render_home_view(data)
+    result = home_view_data_to_dict(data)
 
-    assert "Sam" in html_output
-    assert "Create a new goal" in html_output
-    assert "Just want to talk?" in html_output
-    assert 'class="card"' not in html_output
+    assert result["goals"] == []
+    assert result["error"] is None
 
 
-def test_render_home_view_goals_state_has_one_card_per_goal():
+def test_home_view_data_to_dict_error_short_circuits_before_goals_or_greeting():
     data = HomeViewData(
         greeting_name="Sam",
-        goals=[_card(id="11111111-1111-1111-1111-111111111111", title="Goal A"),
-               _card(id="22222222-2222-2222-2222-222222222222", title="Goal B")],
+        goals=[_card(title="Should not leak")],
+        error="We couldn't load your home screen right now.",
     )
 
-    html_output = render_home_view(data)
+    result = home_view_data_to_dict(data)
 
-    assert html_output.count('class="card"') == 2
-    assert "Goal A" in html_output
-    assert "Goal B" in html_output
-
-
-def test_render_home_view_failure_state_has_message_and_two_entries_no_cards():
-    data = HomeViewData(greeting_name=None, goals=[], error="We couldn't load your home screen right now.")
-
-    html_output = render_home_view(data)
-
-    assert "We couldn&#x27;t load your home screen right now." in html_output or \
-        "We couldn't load your home screen right now." in html_output
-    assert "Create a new goal" in html_output
-    assert "Just want to talk?" in html_output
-    assert 'class="card"' not in html_output
+    assert result == {
+        "greetingName": None,
+        "goals": [],
+        "error": "We couldn't load your home screen right now.",
+    }
+    assert "Should not leak" not in str(result)
 
 
-def test_render_home_view_failure_state_takes_precedence_over_goals_and_empty_state():
-    data = HomeViewData(
-        greeting_name="Sam",
-        goals=[_card()],
-        error="boom",
-    )
+def test_home_view_data_to_dict_no_error_sets_error_key_to_none_explicitly():
+    data = HomeViewData(greeting_name="Sam", goals=[])
 
-    html_output = render_home_view(data)
+    result = home_view_data_to_dict(data)
 
-    assert 'class="card"' not in html_output
-    assert "boom" in html_output
+    assert "error" in result
+    assert result["error"] is None
 
 
-def test_render_home_view_has_no_tab_bar_markup():
+def test_home_view_data_to_dict_never_includes_transcript_key():
     data = HomeViewData(greeting_name="Sam", goals=[_card()])
 
-    html_output = render_home_view(data)
+    result = home_view_data_to_dict(data)
 
-    lowered = html_output.lower()
-    assert "tab-bar" not in lowered
-    assert "reflect" not in lowered
-    assert "journey" not in lowered
-
-
-def test_render_home_view_has_no_streak_or_total_days_markup():
-    data = HomeViewData(greeting_name="Sam", goals=[_card()])
-
-    html_output = render_home_view(data)
-
-    lowered = html_output.lower()
-    assert "total days" not in lowered
-    assert "current streak" not in lowered
-    assert "streak" not in lowered
+    assert "transcript" not in result
+    for goal in result["goals"]:
+        assert "transcript" not in goal
 
 
-def test_create_goal_and_talk_entries_use_prompt_injection_not_tool_call():
-    data = HomeViewData(greeting_name="Sam", goals=[])
-
-    html_output = render_home_view(data)
-
-    assert "lifecoachSendPrompt('I want to create a new goal.')" in html_output
-    assert "lifecoachSendPrompt('I just want to talk.')" in html_output
-    assert "lifecoachSendTool" not in html_output.split("function lifecoachSendTool")[1].split(
-        "function lifecoachSendPrompt"
-    )[0].replace("lifecoachSendTool(toolName, params)", "")
+# ---------------------------------------------------------------------------
+# goal_detail_data_to_dict
+# ---------------------------------------------------------------------------
 
 
-def test_goal_card_click_invokes_tool_call_with_goal_id_not_prompt():
-    goal_id = "33333333-3333-3333-3333-333333333333"
-    data = HomeViewData(greeting_name="Sam", goals=[_card(id=goal_id)])
-
-    html_output = render_home_view(data)
-
-    assert f"lifecoachSendTool('get_goal_detail_view', {{ goal_id: '{goal_id}' }})" in html_output
-
-
-def test_script_includes_unverified_disclaimer_comments_for_both_postmessage_functions():
-    data = HomeViewData(greeting_name="Sam", goals=[])
-
-    html_output = render_home_view(data)
-
-    tool_fn = html_output.split("function lifecoachSendTool")[1].split("function lifecoachSendPrompt")[0]
-    prompt_fn = html_output.split("function lifecoachSendPrompt")[1]
-
-    assert "UNVERIFIED" in tool_fn
-    assert "UNVERIFIED" in prompt_fn
-
-
-GOAL_ID = "33333333-3333-3333-3333-333333333333"
-
-
-def _detail_data(**overrides):
-    defaults = dict(
-        id=GOAL_ID,
+def test_goal_detail_data_to_dict_maps_camel_case_fields():
+    update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
         title="Run a 5k",
         description="Train three times a week",
         progress_percent=42,
-        recent_updates=[],
+        recent_updates=[update],
     )
-    defaults.update(overrides)
-    return GoalDetailViewData(**defaults)
+
+    result = goal_detail_data_to_dict(data)
+
+    assert result == {
+        "id": "33333333-3333-3333-3333-333333333333",
+        "title": "Run a 5k",
+        "description": "Train three times a week",
+        "progressPercent": 42,
+        "recentUpdates": [
+            {"content": "Ran 3 miles today", "createdAt": "2026-06-15T10:00:00+00:00"}
+        ],
+        "error": None,
+    }
 
 
-def test_render_goal_detail_view_renders_title_description_progress_and_updates():
-    update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
-    data = _detail_data(recent_updates=[update])
-
-    html_output = render_goal_detail_view(data)
-
-    assert "Run a 5k" in html_output
-    assert "Train three times a week" in html_output
-    assert "42%" in html_output
-    assert "Ran 3 miles today" in html_output
-    assert "2026-06-15" in html_output
-
-
-def test_render_goal_detail_view_never_includes_transcript_field_name():
-    update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
-    data = _detail_data(recent_updates=[update])
-
-    html_output = render_goal_detail_view(data)
-
-    assert "transcript" not in html_output.lower()
-
-
-def test_render_goal_detail_view_renders_no_updates_yet_for_empty_recent_updates():
-    data = _detail_data(recent_updates=[])
-
-    html_output = render_goal_detail_view(data)
-
-    assert "No updates yet." in html_output
-    assert 'class="update-item"' not in html_output
-
-
-def test_render_goal_detail_view_omits_description_block_when_none():
-    data = _detail_data(description=None)
-
-    html_output = render_goal_detail_view(data)
-    body = html_output.split("<body>")[1]
-
-    assert "detail-description" not in body
-
-
-def test_render_goal_detail_view_renders_no_estimate_yet_for_none_progress_not_zero_percent():
-    data = _detail_data(progress_percent=None)
-
-    html_output = render_goal_detail_view(data)
-    body = html_output.split("<body>")[1]
-
-    assert "0%" not in body
-    assert "no-estimate" in body
-
-
-def test_render_goal_detail_view_renders_zero_percent_distinctly_from_no_estimate():
-    data = _detail_data(progress_percent=0)
-
-    html_output = render_goal_detail_view(data)
-    body = html_output.split("<body>")[1]
-
-    assert "0%" in body
-    assert "no-estimate" not in body
-
-
-def test_render_goal_detail_view_failure_state_has_message_and_no_title_or_updates():
-    update = GoalDetailUpdate(content="should not appear", created_at="2026-06-15T10:00:00+00:00")
+def test_goal_detail_data_to_dict_preserves_none_progress_percent_not_coerced_to_zero():
     data = GoalDetailViewData(
-        id=None,
-        title=None,
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
         description=None,
         progress_percent=None,
+        recent_updates=[],
+    )
+
+    result = goal_detail_data_to_dict(data)
+
+    assert result["progressPercent"] is None
+
+
+def test_goal_detail_data_to_dict_preserves_zero_progress_percent_distinct_from_none():
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description=None,
+        progress_percent=0,
+        recent_updates=[],
+    )
+
+    result = goal_detail_data_to_dict(data)
+
+    assert result["progressPercent"] == 0
+
+
+def test_goal_detail_data_to_dict_maps_multiple_recent_updates_in_order():
+    updates = [
+        GoalDetailUpdate(content="First", created_at="2026-06-14T10:00:00+00:00"),
+        GoalDetailUpdate(content="Second", created_at="2026-06-15T10:00:00+00:00"),
+    ]
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description=None,
+        progress_percent=42,
+        recent_updates=updates,
+    )
+
+    result = goal_detail_data_to_dict(data)
+
+    assert [u["content"] for u in result["recentUpdates"]] == ["First", "Second"]
+
+
+def test_goal_detail_data_to_dict_empty_recent_updates_list():
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description=None,
+        progress_percent=None,
+        recent_updates=[],
+    )
+
+    result = goal_detail_data_to_dict(data)
+
+    assert result["recentUpdates"] == []
+
+
+def test_goal_detail_data_to_dict_error_short_circuits_before_any_other_data_leaks():
+    update = GoalDetailUpdate(content="should not appear", created_at="2026-06-15T10:00:00+00:00")
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description="Train three times a week",
+        progress_percent=42,
         recent_updates=[update],
         error="This goal isn't available.",
     )
 
-    html_output = render_goal_detail_view(data)
-    body = html_output.split("<body>")[1]
+    result = goal_detail_data_to_dict(data)
 
-    assert "This goal isn&#x27;t available." in body or "This goal isn't available." in body
-    assert 'id="goal-title-' not in body
-    assert "should not appear" not in body
-    assert "Continue this conversation" not in body
-    assert "Delete goal" not in body
-
-
-def test_render_goal_detail_view_failure_state_takes_precedence_over_content():
-    data = _detail_data(error="boom")
-
-    html_output = render_goal_detail_view(data)
-    body = html_output.split("<body>")[1]
-
-    assert 'id="goal-title-' not in body
-    assert "boom" in body
-    assert "Run a 5k" not in body
+    assert result == {"error": "This goal isn't available."}
+    assert "id" not in result
+    assert "title" not in result
+    assert "description" not in result
+    assert "progressPercent" not in result
+    assert "recentUpdates" not in result
 
 
-def test_render_goal_detail_view_continue_action_injects_prompt_not_tool_call():
-    data = _detail_data()
+def test_goal_detail_data_to_dict_no_error_sets_error_key_to_none_explicitly():
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description=None,
+        progress_percent=None,
+        recent_updates=[],
+    )
 
-    html_output = render_goal_detail_view(data)
+    result = goal_detail_data_to_dict(data)
 
-    assert "lifecoachContinueGoal" in html_output
-    assert "lifecoachSendPrompt" in html_output.split("function lifecoachContinueGoal")[1].split(
-        "function lifecoachShowDeleteConfirm"
-    )[0]
-
-
-def test_render_goal_detail_view_delete_action_gated_behind_two_stage_confirm():
-    data = _detail_data()
-
-    html_output = render_goal_detail_view(data)
-
-    assert 'class="delete-entry"' in html_output
-    assert 'class="delete-confirm hidden"' in html_output
-    assert f"lifecoachConfirmDelete('{GOAL_ID}')" in html_output
-    assert 'lifecoachSendTool("delete_goal", { goal_id: goalId })' in html_output
+    assert "error" in result
+    assert result["error"] is None
 
 
-def test_render_goal_detail_view_has_no_tab_bar_or_streak_markup():
-    data = _detail_data()
+def test_goal_detail_data_to_dict_never_includes_transcript_key():
+    update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description="Train three times a week",
+        progress_percent=42,
+        recent_updates=[update],
+    )
 
-    html_output = render_goal_detail_view(data)
-    lowered = html_output.lower()
+    result = goal_detail_data_to_dict(data)
 
-    assert "tab-bar" not in lowered
-    assert "reflect" not in lowered
-    assert "journey" not in lowered
-    assert "total days" not in lowered
-    assert "current streak" not in lowered
-    assert "streak" not in lowered
-
-
-def test_render_goal_detail_view_continue_button_onclick_contains_only_uuid_never_hostile_title_text():
-    # Hostile title with a double-quote, a single-quote, and a raw <script>
-    # tag. The "continue conversation" handler must read the title back
-    # from escaped DOM text content at click-time (never interpolate free
-    # text into the onclick JS string), so the onclick attribute itself
-    # must contain nothing but the trusted UUID.
-    hostile_title = '''Evil" Goal' <script>alert(1)</script>'''
-    data = _detail_data(title=hostile_title)
-
-    html_output = render_goal_detail_view(data)
-
-    assert "<script>alert(1)</script>" not in html_output
-    assert "&lt;script&gt;" in html_output
-
-    onclick_marker = f"onclick=\"lifecoachContinueGoal('{GOAL_ID}')\""
-    assert onclick_marker in html_output
-
-    continue_button_start = html_output.index('class="continue-entry"')
-    continue_button_end = html_output.index("</button>", continue_button_start)
-    continue_button_markup = html_output[continue_button_start:continue_button_end]
-
-    assert "onclick" in continue_button_markup
-    onclick_start = continue_button_markup.index('onclick="') + len('onclick="')
-    onclick_end = continue_button_markup.index('"', onclick_start)
-    onclick_value = continue_button_markup[onclick_start:onclick_end]
-
-    assert onclick_value == f"lifecoachContinueGoal('{GOAL_ID}')"
-    assert "Evil" not in onclick_value
-    assert "script" not in onclick_value.lower()
-    assert "'" not in onclick_value.replace(f"'{GOAL_ID}'", "")
-
-
-def test_render_goal_detail_view_delete_button_onclick_contains_only_uuid_never_hostile_title_text():
-    hostile_title = '''Evil" Goal' <script>alert(1)</script>'''
-    data = _detail_data(title=hostile_title)
-
-    html_output = render_goal_detail_view(data)
-
-    delete_show_marker = f"onclick=\"lifecoachShowDeleteConfirm('{GOAL_ID}')\""
-    confirm_marker = f"onclick=\"lifecoachConfirmDelete('{GOAL_ID}')\""
-    assert delete_show_marker in html_output
-    assert confirm_marker in html_output
-    assert "Evil" not in delete_show_marker
-    assert "Evil" not in confirm_marker
-
-
-def test_render_goal_detail_view_title_rendered_as_escaped_dom_text_not_inside_any_onclick():
-    hostile_title = '''Evil" Goal' <script>alert(1)</script>'''
-    data = _detail_data(title=hostile_title)
-
-    html_output = render_goal_detail_view(data)
-
-    title_node_marker = f'id="goal-title-{GOAL_ID}"'
-    assert title_node_marker in html_output
-    title_start = html_output.index(title_node_marker)
-    title_tag_end = html_output.index(">", title_start) + 1
-    title_close = html_output.index("</p>", title_tag_end)
-    title_text_content = html_output[title_tag_end:title_close]
-
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in title_text_content
-    assert "<script>" not in title_text_content
-
-    for onclick_value in _all_onclick_values(html_output):
-        assert "Evil" not in onclick_value
-        assert "script" not in onclick_value.lower()
-
-
-def _all_onclick_values(html_output: str) -> list[str]:
-    values = []
-    marker = 'onclick="'
-    start = 0
-    while True:
-        idx = html_output.find(marker, start)
-        if idx == -1:
-            break
-        value_start = idx + len(marker)
-        value_end = html_output.index('"', value_start)
-        values.append(html_output[value_start:value_end])
-        start = value_end + 1
-    return values
-
-
-def test_html_escape_neutralizes_single_quote_in_interpolated_id():
-    # The only value interpolated into a JS execution context (the onclick
-    # attribute's single-quoted string) is the goal id, which is always a
-    # server-generated UUID, never raw user input. This test documents that
-    # html.escape's default quote=True behavior would HTML-entity-encode an
-    # embedded single quote (preventing it from breaking out of the
-    # surrounding HTML attribute), but flags that this alone would NOT fully
-    # neutralize a JS-string-context breakout for an arbitrary untrusted
-    # value, since the browser HTML-decodes the attribute before the
-    # onclick handler's JS body executes — relevant only if a future change
-    # ever interpolates a non-UUID, user-controlled value into this
-    # template's onclick JS.
-    import html as html_module
-
-    assert html_module.escape("'") == "&#x27;"
+    assert "transcript" not in result
+    for update_dict in result["recentUpdates"]:
+        assert "transcript" not in update_dict

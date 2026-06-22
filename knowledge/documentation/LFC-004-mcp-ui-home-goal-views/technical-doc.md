@@ -252,3 +252,149 @@ A future screen following this same pattern should:
    chat message — and be aware this entire direct-tool-invocation channel
    is still pending verification against a real MCP-UI host (risk #1
    above).
+
+## Post-merge fix: re-architected for MCP Apps / SEP-1865 (everything above this section describes the original, now-superseded mechanism)
+
+After this feature merged, risk #1 above — whether a real MCP-UI host
+actually honors a UI-initiated tool call via `postMessage` — was tested
+against a real Claude Desktop client. The result was worse than "tool
+invocation unsupported, fall back to chat injection": the original
+`EmbeddedResource`-per-tool-call approach described throughout this
+document above **never rendered as a widget at all**. Claude Desktop read
+the returned `text/html` as plain text and summarized it in the chat
+transcript. None of the cards, progress rings, or delete-confirm flow this
+feature built were ever actually displayed in a real host, despite every
+story passing its own tests.
+
+### The actual mechanism: MCP Apps / SEP-1865
+
+Investigation found the correct spec is **MCP Apps / SEP-1865**
+(https://github.com/modelcontextprotocol/ext-apps), which works
+differently from "embed fresh HTML in every tool response":
+
+1. **UI templates are registered once as discoverable MCP resources**, not
+   re-sent on every tool call. `app/mcp_server.py` now has:
+   ```python
+   @mcp.resource(uri="ui://home-view", mime_type="text/html;profile=mcp-app", name="LifeCoach Home View")
+   async def home_view_resource() -> str:
+       return render_home_view()
+
+   @mcp.resource(uri="ui://goal-detail-view", mime_type="text/html;profile=mcp-app", name="LifeCoach Goal Detail View")
+   async def goal_detail_view_resource() -> str:
+       return render_goal_detail_view()
+   ```
+   The host fetches and loads each resource once, up front (discoverable
+   via `mcp.list_resources()`), rather than receiving HTML embedded in
+   every `tools/call` result.
+
+2. **Each tool that has an associated UI declares it in `_meta`.** FastMCP's
+   `@mcp.tool` decorator has no first-class parameter for `_meta`, so this
+   is wired by directly mutating the registered tool object after
+   definition, at module load time:
+   ```python
+   mcp._tool_manager._tools["get_home_view"].meta = {"ui": {"resourceUri": "ui://home-view"}}
+   mcp._tool_manager._tools["get_goal_detail_view"].meta = {"ui": {"resourceUri": "ui://goal-detail-view"}}
+   mcp._tool_manager._tools["delete_goal"].meta = {"ui": {"resourceUri": "ui://home-view"}}
+   ```
+   `delete_goal` intentionally points at `ui://home-view`, not
+   `ui://goal-detail-view` — it returns a refreshed home-view payload on
+   success, so the host should re-render the home widget, not the detail
+   one. `record_update`/`list_updates`/`set_goal_progress` carry no `ui`
+   key — they have no associated UI surface.
+
+3. **Tool calls now return plain structured `dict`s, never HTML.**
+   `get_home_view`, `get_goal_detail_view`, and `delete_goal` all changed
+   return type from `EmbeddedResource` to `dict`, produced by two new
+   converter functions in `app/ui_templates.py`:
+   `home_view_data_to_dict(HomeViewData) -> dict` and
+   `goal_detail_data_to_dict(GoalDetailViewData) -> dict`. These map the
+   existing dataclasses to camelCase keys (`greetingName`, `progressPercent`,
+   `lastUpdatedAt`, `recentUpdates`, `createdAt`) for the client-side JS to
+   consume directly. The `None`-vs-`0` progress distinction and the
+   error-takes-precedence contract described earlier in this document are
+   preserved unchanged in the dict conversion — only the transport shape
+   changed, not the data semantics.
+
+4. **Rendering moved entirely client-side.** `render_home_view()` and
+   `render_goal_detail_view()` in `app/ui_templates.py` now take **no
+   arguments** and return a static HTML document — the same document every
+   time, regardless of data — containing two inline scripts:
+   - `_BRIDGE_JS`: implements the `ui/initialize` handshake (posts a
+     JSON-RPC `ui/initialize` request to `window.parent` on load, waits for
+     the host's response, then exposes `window.callTool(name, args)` and
+     `window.sendMessage(text)` as promise-returning functions wrapping
+     JSON-RPC-over-`postMessage` calls). Also listens for
+     `ui/notifications/tool-result` so a tool call triggered from a button
+     click (e.g. clicking a goal card calls `get_goal_detail_view`) can
+     re-render the widget in place via `window.onToolResult`.
+   - `_RENDER_JS`: client-side equivalents of the old server-side Python
+     renderers — `renderHomeView(data)`, `renderGoalDetailView(data)`,
+     `goalCard(g)`, `progressRing(percent)`, `updatedLine(lastUpdatedAt)`,
+     and a client-side `escapeHtml(s)` — building HTML via string
+     concatenation against the structured `dict` the tool call returns,
+     executed inside the rendered widget rather than on the server.
+
+   The previous server-side Python renderers (`_render_goals_state`,
+   `_render_empty_state`, `_progress_ring`, `_detail_update_item`, etc.)
+   were deleted entirely along with their docstrings — they have no
+   client-side equivalent role to play, since the server's only job now is
+   to serve the one static template per resource and return structured
+   data from tool calls.
+
+### XSS fix: the "continue this conversation" button regression
+
+While re-verifying the onclick-interpolation discipline this repo's tests
+have enforced since the original LFC-STORY-004 (only the server-generated
+UUID may be interpolated into an `onclick` JS-execution context; free text
+like a goal's title must only ever be read back from escaped DOM
+`textContent`), QA found that the client-side JS migration **reintroduced
+exactly the risk class the original server-rendered template had
+deliberately avoided**. The regressed code:
+
+```js
+'<button class="continue-entry" type="button" onclick="window.sendMessage(\'Let\'s continue talking about ' + safeTitle + '.\')">Continue this conversation</button>'
+```
+
+`safeTitle` — HTML-escaped via the client-side `escapeHtml`, but otherwise
+the raw, user-controlled goal title — was concatenated directly into a
+single-quoted JS string literal inside the `onclick` attribute value.
+Browsers HTML-decode an attribute's value *before* the JS engine parses the
+handler's source, so HTML-escaping alone does not prevent a hostile title
+from breaking out of the string: an apostrophe surviving as `&#x27;` in the
+markup decodes back to a literal `'` by the time the `onclick` body is
+parsed as JavaScript, closing the string early and allowing arbitrary
+script to follow. No other `onclick` in the file had this issue — `goalCard`,
+both delete-confirm stages, and the create/talk entries all interpolate only
+a trusted UUID or static literal text.
+
+**Fix:** the continue button's `onclick` now interpolates only the trusted
+UUID (`continueGoal('<uuid>')`), matching every other `onclick` in the file.
+A new `continueGoal(goalId)` function reads the title back from the
+already-escaped `goal-title-<id>` DOM element's `textContent` at click
+time and passes that to `window.sendMessage` — exactly mirroring the old
+server-rendered template's `lifecoachContinueGoal` pattern, just
+client-side now. This is the second time this exact technique (DOM
+`textContent` read-back instead of JS-string interpolation) has been the
+fix for this risk class in this feature; treat it as the standing pattern
+for any future click handler that needs to reference free text.
+
+### Confirmed against a real host
+
+Unlike every prior "unverified against a live MCP-UI host" caveat recorded
+throughout this feature, this re-architecture **was directly confirmed by
+the user to render as an actual interactive widget in Claude Desktop** —
+the `ui/initialize` handshake, the resource-registration +
+`_meta["ui"]["resourceUri"]` linkage, and the client-side rendering of all
+three tools' structured responses were all observed working live. This
+resolves risk #1 from the list above — it is no longer an open item.
+
+### What did not change
+
+`enforce_mcp_rate_limit` → `verify_bearer_token` ordering, the RLS-only
+query scoping, the failure-handling try/except wrapping (still returns a
+handled-failure shape — now a `dict` with `error` set instead of a failure
+`EmbeddedResource` — rather than letting an exception propagate), and the
+`_fetch_home_view_data`/shared-helper reuse between `get_home_view` and
+`delete_goal` are all unchanged by this fix. The two tool input schemas
+(`goal_id`, `percentage`, `rationale`) and `set_goal_progress` (which never
+had a UI surface) are untouched.

@@ -416,3 +416,100 @@ cross-story test totals and every recurring caveat carried forward across
 the entire feature, including the prominently-flagged unverified
 MCP-UI-host `postMessage` tool-invocation assumption (LFC-STORY-003 AC5)
 and the `strategy.md` "read-only" documentation gap.
+
+## Post-merge fix: MCP Apps re-architecture
+
+**What changed and why:** After this feature merged to `main`, the
+single biggest open risk flagged across every story above — whether a UI
+click in a real MCP-UI host can actually invoke a tool call via
+`postMessage` — was tested against a real Claude Desktop client. The
+result: the original implementation (each tool call returning an inline
+`EmbeddedResource` carrying fresh `text/html`) did not render as an
+interactive widget at all. Claude Desktop read the HTML as plain text and
+summarized it in the chat transcript instead of rendering the cards,
+progress rings, or delete-confirm flow this feature built.
+
+Investigation identified the actual mechanism this needed to follow:
+**MCP Apps / SEP-1865** (https://github.com/modelcontextprotocol/ext-apps).
+Under that spec, UI templates are registered once as discoverable MCP
+resources (`@mcp.resource(uri="ui://...", mime_type="text/html;profile=mcp-app")`),
+each tool that has an associated UI declares it via
+`_meta["ui"]["resourceUri"]` pointing at one of those resources, and the
+tool call itself returns structured data — not HTML — for the
+already-loaded resource to render client-side via a JSON-RPC-over-`postMessage`
+bridge. This is architecturally different from "embed HTML in the tool
+response," which is what every story in this feature originally shipped.
+
+**What was implemented:** `app/mcp_server.py` gained two
+`@mcp.resource(...)`-registered functions (`home_view_resource` ->
+`ui://home-view`, `goal_detail_view_resource` -> `ui://goal-detail-view`),
+each returning a static HTML document from `app/ui_templates.py`.
+`get_home_view`/`get_goal_detail_view`/`delete_goal` were changed to return
+plain `dict`s (via new `home_view_data_to_dict`/`goal_detail_data_to_dict`
+helpers converting the existing dataclasses to camelCase) instead of
+`EmbeddedResource`s. Three module-level lines mutate
+`mcp._tool_manager._tools["<name>"].meta` directly to attach
+`{"ui": {"resourceUri": "..."}}` to each of those three tools — a
+workaround since FastMCP's `@mcp.tool` decorator has no first-class
+parameter for `_meta`. In `app/ui_templates.py`,
+`render_home_view()`/`render_goal_detail_view()` were changed to take no
+arguments, returning a static HTML document containing an inline JS bridge
+(the `ui/initialize` handshake, `window.callTool`/`window.sendMessage`) and
+inline rendering JS that builds the same HTML structure the old
+server-rendered Python templates produced, but now executed client-side
+inside the rendered widget against the structured data the tool call
+returns.
+
+**What was tested and why:** Read the full diff of both files before
+relying on any summary of "what changed," per this repo's standing
+practice of verifying agent reports rather than trusting them at face
+value. Rewrote `tests/unit/test_ui_templates.py` end to end (39 tests,
+replacing 31 obsolete tests that asserted the old server-rendered-HTML
+contract, which no longer applies since rendering moved client-side):
+covers the static-template/no-argument contract, presence of the bridge
+and render JS functions, the `ui/initialize` handshake, and thorough
+coverage of `home_view_data_to_dict`/`goal_detail_data_to_dict` (camelCase
+mapping, `None` progress preserved distinct from `0`, error-state
+short-circuiting, `transcript` never a key). Cross-checked the client-side
+`escapeHtml` JS implementation against Python's `html.escape` on an
+identical payload to confirm the XSS-escaping discipline this repo
+established (LFC-STORY-003/004) migrated correctly — same five characters,
+correct escaping order. Added 9 tests to `tests/unit/test_mcp_server.py`
+confirming both `@mcp.resource(...)` registrations are reachable via
+`mcp.list_resources()` with the correct mime type, that the resource
+functions return the templates' real output, and that the
+`_meta["ui"]["resourceUri"]` mapping is exactly as intended (including
+explicitly verifying `delete_goal` correctly maps to `ui://home-view`, not
+`ui://goal-detail-view`, since it returns a refreshed home-view dict on
+success). `tests/unit/test_mcp_server.py` and the three feature test files
+were already adapted to the new dict-return shape before this pass and
+needed no further changes.
+
+**Defect found, not fixed:** Re-verifying the onclick-interpolation
+discipline this repo's tests have enforced since LFC-STORY-004 (only the
+server-generated UUID may be interpolated into an `onclick` JS-execution
+context; free text must only ever land in escaped DOM text content) found
+a genuine regression in `renderGoalDetailView`'s "continue this
+conversation" button: the client-side JS now concatenates the
+(HTML-escaped, but otherwise user-controlled) goal title directly into a
+single-quoted JS string literal inside the `onclick` attribute, rather than
+reading it back from DOM `textContent` at click time as the old
+server-rendered template did. Because browsers HTML-decode attribute
+values before the JS engine parses the handler's source, HTML-escaping
+alone does not prevent a hostile title from breaking out of the JS string.
+This was reported as a FAIL-class finding rather than silently patched,
+with a tripwire test added to `test_ui_templates.py` documenting the exact
+current (vulnerable) behavior.
+
+**Confirmed against a real host:** Unlike every prior caveat in this
+feature recorded as "unverified against a live MCP-UI host," this
+re-architecture **was directly confirmed by the user to render as a real
+interactive widget in Claude Desktop** — stated here as a verified fact,
+the first time in this feature's history that the live-host assumption
+has actually been confirmed rather than flagged as open.
+
+**Test results:** Full suite: 219 passed, 0 failed, across two consecutive
+runs with no flakiness (171 pre-existing + 39 rewritten
+`test_ui_templates.py` + 9 new `test_mcp_server.py` tests). See
+`test-results.md` for the full breakdown, including the new defect
+write-up.

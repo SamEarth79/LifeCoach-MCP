@@ -385,15 +385,19 @@ serialized. `id` and `goal_id` are also not included.
 
 ### Tool: `get_home_view`
 
-Returns the home screen UI for the signed-in user as a rendered HTML
-resource: a greeting, a card per active goal with its progress, and
-distinct "create a new goal" / "just want to talk?" entries. Not a source
-of goal data for an MCP client's own reasoning — use `list_updates`/other
-tools for that.
+Returns the home screen's data for the signed-in user, for the
+already-registered `ui://home-view` MCP resource to render client-side: a
+greeting, a card per active goal with its progress, and distinct "create a
+new goal" / "just want to talk?" entries. Not a source of goal data for an
+MCP client's own reasoning — use `list_updates`/other tools for that.
 
 - **Auth required**: yes (`Authorization` bearer JWT, verified before any
   tool logic runs).
 - **Rate limited**: yes, same per-IP threshold as REST endpoints.
+- **Associated UI resource**: declared via `_meta["ui"]["resourceUri"] =
+  "ui://home-view"` on the tool's registration (see "MCP resources" below)
+  — an MCP Apps-aware host loads that resource once and renders this tool's
+  result inside it, rather than receiving HTML in the tool response itself.
 
 #### Input schema
 
@@ -401,28 +405,35 @@ No parameters. The user is identified entirely from the verified JWT.
 
 #### Output
 
-An MCP `EmbeddedResource`:
+A plain `dict` (camelCase keys, for the client-side renderer to consume
+directly):
 
 ```json
 {
-  "type": "resource",
-  "resource": {
-    "uri": "ui://home-view",
-    "mimeType": "text/html",
-    "text": "<!DOCTYPE html>..."
-  }
+  "greetingName": "Sam",
+  "goals": [
+    {
+      "id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+      "title": "Run a 5k",
+      "progressPercent": 42,
+      "lastUpdatedAt": "2026-06-21T09:00:00.000000+00:00"
+    }
+  ],
+  "error": null
 }
 ```
 
-The rendered HTML shows one card per active goal (title + a circular
-progress indicator, showing a real percentage or a dashed "no estimate
-yet" treatment when `progress_percent` is `NULL`, plus an "Updated <date>"
-line when the goal has at least one recorded update), a "create a new
-goal" entry and a "just want to talk?" entry (both inject a chat message
-via `postMessage` rather than calling a tool), or an empty-state variant
-when the caller has zero active goals. Clicking a goal card invokes
-`get_goal_detail_view` directly via `postMessage` — **unverified against a
-live MCP-UI host**, see this feature's technical doc for the open risk.
+`progressPercent` is `null` when the goal has no self-reported progress
+estimate yet — distinct from `0`, a real estimate of no progress.
+`lastUpdatedAt` is `null` when the goal has no recorded updates. `goals` is
+`[]`, not an error, when the caller has zero active goals.
+
+This was previously an MCP `EmbeddedResource` carrying a complete
+server-rendered HTML document (`uri: "ui://home-view"`,
+`mimeType: "text/html"`). That approach never rendered as an interactive
+widget against a real MCP-UI host — see this feature's technical doc's
+post-merge-fix section — and was replaced with this structured-data
+contract plus the resource registration described below.
 
 #### Error cases
 
@@ -430,20 +441,24 @@ live MCP-UI host**, see this feature's technical doc for the open risk.
 |---|---|
 | Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
 | Per-IP rate limit exceeded | Rejected before any database call. |
-| The caller's `users` row is missing, or any unhandled error occurs while loading the screen | Handled internally — returns a failure-state `EmbeddedResource` describing the problem in user-safe language, rather than raising. Never an `isError: true` result for this case. |
+| The caller's `users` row is missing, or any unhandled error occurs while loading the screen | Handled internally — returns `{"greetingName": null, "goals": [], "error": "We couldn't load your home screen right now."}` rather than raising. Never an `isError: true` result for this case. |
 
 ---
 
 ### Tool: `get_goal_detail_view`
 
-Returns the goal-detail screen UI for one of the caller's own goals as a
-rendered HTML resource: full title/description, progress, a short list of
-recent updates, a "continue this conversation" action, and a delete action
-behind an explicit confirm step.
+Returns the goal-detail screen's data for one of the caller's own goals,
+for the already-registered `ui://goal-detail-view` MCP resource to render
+client-side: full title/description, progress, a short list of recent
+updates, a "continue this conversation" action, and a delete action behind
+an explicit confirm step.
 
 - **Auth required**: yes (`Authorization` bearer JWT, verified before any
   tool logic runs).
 - **Rate limited**: yes, same per-IP threshold as REST endpoints.
+- **Associated UI resource**: declared via `_meta["ui"]["resourceUri"] =
+  "ui://goal-detail-view"` on the tool's registration (see "MCP resources"
+  below).
 
 #### Input schema
 
@@ -453,16 +468,33 @@ behind an explicit confirm step.
 
 #### Output
 
-Same `EmbeddedResource` shape as `get_home_view`, with `uri:
-"ui://goal-detail-view"`. The rendered HTML shows the goal's full
-title/description, its progress indicator, up to 5 most recent updates
-(`content` + date only, never `transcript` — same discipline as
-`list_updates`, with an explicit "No updates yet." message when there are
-none), a "continue this conversation" action (injects a chat message
-referencing the goal by title, never a tool call), and a two-stage
-delete-confirm action whose confirmed step calls `delete_goal` directly via
-`postMessage` — **unverified against a live MCP-UI host**, see this
-feature's technical doc.
+A plain `dict`:
+
+```json
+{
+  "id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+  "title": "Run a 5k",
+  "description": "Train three times a week",
+  "progressPercent": 42,
+  "recentUpdates": [
+    {"content": "Ran 3 miles today", "createdAt": "2026-06-21T09:00:00.000000+00:00"}
+  ],
+  "error": null
+}
+```
+
+`recentUpdates` carries only `content` and `createdAt` per item — never
+`transcript`, same discipline as `list_updates`. `recentUpdates` is `[]`,
+not an error, when the goal has no updates yet — the client-side renderer
+displays "No updates yet." for this case.
+
+On a handled failure (goal missing/not owned/soft-deleted, or any
+unhandled error while loading), the dict instead has only an `error` key
+set: `{"error": "This goal isn't available."}`.
+
+This was previously the same `EmbeddedResource` shape `get_home_view` used
+to return, with `uri: "ui://goal-detail-view"`. See `get_home_view`'s entry
+above and this feature's technical doc for why that approach was replaced.
 
 #### Error cases
 
@@ -471,7 +503,7 @@ feature's technical doc.
 | Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
 | Per-IP rate limit exceeded | Rejected before any database call. |
 | `goal_id` is not a valid UUID | Validation error raised before any database call. |
-| `goal_id` does not exist, isn't owned by the caller, or is soft-deleted | Handled internally — returns a failure-state `EmbeddedResource` ("This goal isn't available.") rather than raising. Never an `isError: true` result for this case. |
+| `goal_id` does not exist, isn't owned by the caller, or is soft-deleted | Handled internally — returns `{"error": "This goal isn't available."}` rather than raising. Never an `isError: true` result for this case. |
 | Any unhandled error occurs while loading the screen | Same handled-failure behavior as above. |
 
 ---
@@ -525,13 +557,16 @@ Soft-deletes one of the caller's own goals — identical SQL semantics to the
 existing REST `DELETE /goals/{id}` (an `UPDATE ... SET deleted_at = now()`,
 never a SQL `DELETE`). Intended to be called from the goal-detail view's
 confirm-delete UI action after the user has explicitly confirmed, not
-invoked proactively mid-conversation. On success, returns a refreshed home
-screen resource reflecting the deletion, rather than a plain
-acknowledgement.
+invoked proactively mid-conversation. On success, returns refreshed home
+screen data reflecting the deletion, rather than a plain acknowledgement.
 
 - **Auth required**: yes (`Authorization` bearer JWT, verified before any
   tool logic runs).
 - **Rate limited**: yes, same per-IP threshold as REST endpoints.
+- **Associated UI resource**: declared via `_meta["ui"]["resourceUri"] =
+  "ui://home-view"` on the tool's registration — intentionally points at
+  the home-view resource, not the detail-view one, since this tool returns
+  a refreshed home view on success (see "MCP resources" below).
 
 #### Input schema
 
@@ -541,10 +576,12 @@ acknowledgement.
 
 #### Output
 
-Same `EmbeddedResource` shape as `get_home_view` (`uri: "ui://home-view"`)
-— the home view, refreshed to exclude the deleted goal — produced via the
-same `_fetch_home_view_data`/`_build_home_view_resource` helpers
-`get_home_view` itself uses, not a parallel implementation.
+Same `dict` shape `get_home_view` returns — the home view's data, refreshed
+to exclude the deleted goal — produced via the same
+`_fetch_home_view_data`/`home_view_data_to_dict` helpers `get_home_view`
+itself uses, not a parallel implementation. Previously the same
+`EmbeddedResource` shape `get_home_view` used to return (`uri:
+"ui://home-view"`); see `get_home_view`'s entry above for why that changed.
 
 #### Error cases
 
@@ -554,4 +591,36 @@ same `_fetch_home_view_data`/`_build_home_view_resource` helpers
 | Per-IP rate limit exceeded | Rejected before any database call. |
 | `goal_id` is not a valid UUID | Validation error raised before any database call. |
 | `goal_id` does not exist, is not owned by the caller, or is already soft-deleted | The RLS-scoped `UPDATE` returns no row; the tool raises an error with no commit and no home-view refresh attempted. |
-| The post-delete home-view refresh itself fails (e.g. an unhandled error reading the caller's updated goal list) | Handled internally — returns a failure-state `EmbeddedResource` rather than raising, even though the delete itself already succeeded and committed. |
+| The post-delete home-view refresh itself fails (e.g. an unhandled error reading the caller's updated goal list) | Handled internally — returns `{"greetingName": null, "goals": [], "error": "We couldn't load your home screen right now."}` rather than raising, even though the delete itself already succeeded and committed. |
+
+---
+
+## MCP resources
+
+In addition to tools, the MCP surface registers two **resources** — static
+content the host fetches and loads once, rather than data returned from a
+tool call. These exist specifically to support the MCP Apps / SEP-1865
+pattern the three tools above use: a tool declares `_meta["ui"]["resourceUri"]`
+pointing at one of these, and an MCP Apps-aware host renders that tool's
+structured result inside the already-loaded resource via a
+JSON-RPC-over-`postMessage` bridge, rather than receiving HTML in the tool
+response itself.
+
+### Resource: `ui://home-view`
+
+- **MIME type**: `text/html;profile=mcp-app`.
+- **Content**: a static HTML document containing an inline JS bridge
+  (implements the `ui/initialize` handshake; exposes `window.callTool`/
+  `window.sendMessage`) and inline rendering JS that builds the home
+  screen's markup client-side from `get_home_view`'s (or `delete_goal`'s)
+  structured result. The same document is returned on every fetch — no
+  per-user data is baked into the resource itself.
+- **Referenced by**: `get_home_view`, `delete_goal`.
+
+### Resource: `ui://goal-detail-view`
+
+- **MIME type**: `text/html;profile=mcp-app`.
+- **Content**: a static HTML document, same bridge/rendering-JS structure
+  as above, rendering the goal-detail screen's markup client-side from
+  `get_goal_detail_view`'s structured result.
+- **Referenced by**: `get_goal_detail_view`.
