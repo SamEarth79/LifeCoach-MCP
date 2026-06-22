@@ -1,12 +1,15 @@
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.responses import HTMLResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.auth import CurrentUser, get_current_user
+from app.config import get_settings
 from app.db import check_connectivity, get_rls_connection
 from app.mcp_server import mcp
+from app.oauth_consent import render_oauth_consent_page
 from app.rate_limit import get_client_ip, limiter, per_ip_rate_limit, settings
 from app.schemas import GoalCreate, GoalResponse, GoalUpdate
 
@@ -201,6 +204,12 @@ async def delete_goal(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found")
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/oauth/consent", response_class=HTMLResponse)
+async def get_oauth_consent_page() -> str:
+    app_settings = get_settings()
+    return render_oauth_consent_page(app_settings.supabase_url, app_settings.supabase_anon_key)
 
 
 mcp_asgi_app = mcp.streamable_http_app()
