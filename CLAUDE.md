@@ -1,5 +1,6 @@
 
 
+
 <!-- AGENT-FRAMEWORK:START (do not edit between these markers; managed by scripts/deploy.sh) -->
 # Agent Framework
 
@@ -46,8 +47,8 @@ my-app/
         architecture.md
         requirements.md
         stories/
-          LFC-STORY-001.md
-          LFC-STORY-002.md
+          LFC-STORY-001-001.md
+          LFC-STORY-001-002.md
     implementations/
       LFC-001-user-auth/
         implementation-summary.md
@@ -85,8 +86,11 @@ features.
   `config.json` — it will ask for the product name once and derive the
   prefix.
 - Feature folders: `<PREFIX>-<NNN>-<slug>` (e.g. `LFC-001-user-auth`).
-- Stories: `<PREFIX>-STORY-<NNN>` (e.g. `LFC-STORY-001`), one file per story
-  inside the feature's `stories/` dir.
+- Stories: `<PREFIX>-STORY-<feature-NNN>-<story-NNN>` (e.g.
+  `LFC-STORY-001-001`), one file per story inside the feature's `stories/`
+  dir. The first `NNN` is the feature's own number (so story codes stay
+  unique across features); the second `NNN` is a per-feature counter that
+  resets to `001` for each new feature.
 - Requirements live as plain numbered items inside a single `requirements.md`
   per feature (no per-requirement file or code).
 
@@ -131,6 +135,20 @@ Every agent that writes or tests code must consult, in order:
 2. `rules/security.md`
 3. `rules/testing.md` (specifically the `qa` agent during `test.md`)
 
+## Agent completion verification
+
+An agent's own report of what it did (success, failure, or silence) is not
+sufficient on its own — it can be wrong in either direction: a reported
+failure can leave real, usable work on disk, and a reported success (or a
+lost/never-received report, e.g. after a background process restart) can
+hide that nothing actually happened. Every agent spawn — whether inside a
+command's defined workflow or spawned ad hoc — must state, in the prompt,
+the concrete artifact that proves completion (a file path with non-stub
+content, a non-empty `git diff`, or a passing test command). After the
+agent returns, regardless of what it reported, verify that artifact
+directly (`ls`/`cat`/`git diff`/run the tests) before treating the task as
+done or not-done.
+
 ## Git conventions
 
 - One branch per feature: `feature/<feature-folder>` (e.g.
@@ -141,7 +159,7 @@ Every agent that writes or tests code must consult, in order:
   results, and asks for explicit confirmation before committing — it never
   commits silently.
 - Commit message format: `<STORY-CODE>: <short summary>` (e.g.
-  `LFC-STORY-001: add login form`).
+  `LFC-STORY-001-001: add login form`).
 - No automatic PR creation, no automatic merging, ever. `/pr-create` and
   `/pr-review` are separate manual commands, and merging is always a human
   decision.
