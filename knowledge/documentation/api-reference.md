@@ -253,6 +253,63 @@ and a later `PATCH` against the same `goal_id` returns `404`.
 
 ---
 
+## `GET /oauth/consent`
+
+Serves the OAuth consent login page that Supabase's OAuth 2.1 Server
+redirects a browser to when an external OAuth client (e.g. an MCP client
+such as Claude Desktop) requests access. Returns a complete, standalone
+HTML document; the entire login + consent flow (session check, login form,
+consent screen, approve/deny) runs client-side via the
+`@supabase/supabase-js` SDK after the page loads — this route's only job is
+to serve the page shell with `SUPABASE_URL`/`SUPABASE_ANON_KEY` injected as
+JS constants so the SDK can initialize.
+
+- **Auth required**: **no** — unlike every other endpoint in this
+  reference. This is deliberate, not an oversight: Supabase redirects a
+  browser here before it's known whether the visitor has an active
+  session, so the page must be reachable with no bearer token and no
+  cookie in order to present the login form in the first place. The actual
+  authentication happens entirely client-side, after the page loads, via
+  `signInWithPassword`.
+- **Rate limited**: no.
+
+### Request
+
+```
+GET /oauth/consent?authorization_id=<id>
+```
+
+`authorization_id` is read client-side from the query string, not parsed
+server-side. If it's missing, the page renders a non-technical failure
+state in the browser rather than a broken form — the server still returns
+`200` either way, since the failure state is part of the served page, not
+an HTTP error.
+
+### Response — `200 OK`
+
+`Content-Type: text/html`. A complete `<!DOCTYPE html>` document containing
+the pinned-exact-version `@supabase/supabase-js` CDN script tag, the
+injected config constants, and the embedded JS that drives the rest of the
+flow (login form, consent screen rendering, and the approve/deny calls to
+Supabase's `getAuthorizationDetails`/`approveAuthorization`/
+`denyAuthorization`).
+
+### Error cases
+
+None at the HTTP level — this route never returns a non-`200` status; every
+failure mode (missing `authorization_id`, invalid/expired
+`authorization_id`, failed login, a failed approve/deny call) is rendered
+as a state within the same `200` HTML page, not as an HTTP error response.
+
+**Unverified external contract**: the actual response shapes of
+`signInWithPassword`, `getAuthorizationDetails`, `approveAuthorization`, and
+`denyAuthorization` (all assumed as `{ data, error }`) have not been
+confirmed against a live Supabase project — see this feature's technical
+doc (`knowledge/documentation/LFC-005-oauth-consent-login/technical-doc.md`)
+for the full caveat.
+
+---
+
 ## MCP tools
 
 Mounted on the same FastAPI app (same process, root path), via the MCP

@@ -7,6 +7,16 @@ All notable changes to this project are documented in this file, following
 
 ### Added
 
+- OAuth consent login page (LFC-005): a new unauthenticated page,
+  `GET /oauth/consent`, that Supabase's OAuth 2.1 Server redirects a
+  browser to so a user can log in and approve or deny an external OAuth
+  client's (e.g. an MCP client like Claude Desktop) request to connect.
+  Shows an email/password login form when there's no active session, then
+  a consent screen with the requesting client's name and requested scopes,
+  and reports the approve/deny decision back to Supabase before redirecting
+  the browser back to the OAuth client. The entire login/consent flow runs
+  client-side via the `@supabase/supabase-js` SDK; the backend only serves
+  the page shell.
 - MCP-UI home and goal-detail views (LFC-004): two interactive screens
   rendered server-side as HTML and returned from MCP tool calls, viewable
   inside an MCP-UI-capable host — the first feature with any rendered UI

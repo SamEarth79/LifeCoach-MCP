@@ -226,6 +226,68 @@ than data for an LLM to reason over.
   minor fix. Tracked in
   `knowledge/documentation/LFC-004-mcp-ui-home-goal-views/technical-doc.md`.
 
+### A third surface: a directly browser-navigable, client-side-JS-driven page
+
+Starting with the OAuth consent login page (LFC-005), the backend serves a
+third kind of surface, distinct from both of the other two:
+
+- **REST routes** (`/health`, `/users/me`, `/goals`) return JSON; all logic
+  is server-side Python.
+- **MCP-UI** (`get_home_view`/`get_goal_detail_view`) returns HTML, but only
+  as an `EmbeddedResource` rendered *inside* an MCP-UI host's iframe/webview
+  — never directly browser-navigated to, and the HTML itself is fully
+  server-rendered with no client-side SDK calls of its own.
+- **`GET /oauth/consent`** returns HTML too, but it's a normal, directly
+  browser-navigable page with no parent-frame/iframe relationship at all,
+  and — unlike every other route or MCP tool in this app — almost none of
+  its logic runs server-side. FastAPI's only job is to serve the page shell
+  with `SUPABASE_URL`/`SUPABASE_ANON_KEY` injected as JS constants; the
+  entire login + consent flow (session check, login form, fetching
+  authorization details, rendering scopes, reporting the approve/deny
+  decision) runs client-side via the `@supabase/supabase-js` SDK, loaded
+  from a pinned-exact-version jsDelivr CDN `<script>` tag — the first and
+  only client-side JS SDK dependency in the repo.
+
+```
+  Supabase OAuth          ┌───────────────┐
+  2.1 Server     ───────→ │   FastAPI     │  serves static HTML shell only
+  (redirects        GET   │ get_oauth_    │  (SUPABASE_URL/ANON_KEY injected
+   browser here)          │ consent_page  │   as JS constants)
+                          └──────┬────────┘
+                                  │ browser loads page, then talks directly
+                                  ▼
+                          ┌───────────────┐
+                          │ @supabase/    │  login, session check,
+                          │ supabase-js   │  getAuthorizationDetails,
+                          │ (in-browser)  │  approve/denyAuthorization
+                          └───────────────┘
+```
+
+This route is also the only one in the app with no FastAPI-level auth
+dependency (`Depends(get_current_user)`) and no rate limiting — both
+deliberate, since Supabase redirects a browser here before any session
+exists, so the page must be reachable unauthenticated to show the login
+form at all. Real authentication and authorization happen entirely inside
+the client-side flow via Supabase's own session/token handling, not at this
+route's HTTP layer.
+
+Two distinct escaping disciplines are used on this page, for two distinct
+injection contexts: a server-side `_escape_js_string` helper for the two
+config values injected into the page's `<script>` body (escaping
+backslash/quote/`</script>`-breakout, a JS-string-literal context), and a
+client-side `lifecoachEscapeHtml` helper for the OAuth-client-controlled
+`client.name`/scope values fetched from Supabase and written into the
+consent screen's `innerHTML` (standard HTML-entity escaping). These are
+deliberately not the same function — see
+`knowledge/documentation/LFC-005-oauth-consent-login/technical-doc.md` for
+why one would be the wrong choice for the other's sink.
+
+**Known risk, consistent with this feature's other unverified-contract
+caveats**: the actual response shapes of `signInWithPassword`,
+`getAuthorizationDetails`, `approveAuthorization`, and `denyAuthorization`
+are assumed, not confirmed against a live Supabase project — no real
+deployment with "Site URL"/"Authorization Path" configured exists yet.
+
 ### Soft delete as an RLS-enforced pattern
 
 The `goals` table (added in LFC-002) is the first user-owned table beyond
