@@ -1,11 +1,12 @@
 {
   "prefix": "LFC",
-  "nextFeatureNumber": 6,
+  "nextFeatureNumber": 7,
   "nextStoryNumber": {
     "LFC-001-auth-infra-baseline": 5,
     "LFC-002-goals": 6,
     "LFC-003-updates": 4,
     "LFC-004-mcp-ui-home-goal-views": 6,
-    "LFC-005-oauth-consent-login": 4
+    "LFC-005-oauth-consent-login": 4,
+    "LFC-006-deployment": 2
   }
 }
