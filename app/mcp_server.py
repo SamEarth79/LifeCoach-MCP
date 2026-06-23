@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-mcp = FastMCP("lifecoach", streamable_http_path="/")
+mcp = FastMCP("lifecoach", streamable_http_path="/", transport_security=None)
 
 
 @mcp.resource(
