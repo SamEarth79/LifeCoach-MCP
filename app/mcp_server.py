@@ -26,7 +26,14 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-mcp = FastMCP("lifecoach", streamable_http_path="/", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+mcp = FastMCP(
+    "lifecoach",
+    streamable_http_path="/",
+    transport_security=TransportSecuritySettings(
+        allowed_hosts=settings.mcp_allowed_hosts_list,
+        allowed_origins=settings.mcp_allowed_origins_list,
+    ),
+)
 
 
 @mcp.resource(

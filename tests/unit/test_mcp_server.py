@@ -1225,3 +1225,22 @@ def test_record_update_set_goal_progress_and_list_updates_tools_have_no_ui_meta(
     for tool_name in ("record_update", "list_updates", "set_goal_progress"):
         tool = mcp_server.mcp._tool_manager._tools[tool_name]
         assert tool.meta is None or "ui" not in tool.meta
+
+
+def test_mcp_transport_security_keeps_dns_rebinding_protection_enabled():
+    # Regression test: a prior fix for a Render-deployment Host-header
+    # rejection disabled DNS rebinding protection entirely
+    # (enable_dns_rebinding_protection=False) instead of scoping
+    # allowed_hosts/allowed_origins to the real deployed domain. That
+    # disabled Host-header validation outright, not just for the
+    # then-mismatched Render hostname. Protection must stay enabled.
+    transport_security = mcp_server.mcp.settings.transport_security
+
+    assert transport_security.enable_dns_rebinding_protection is True
+
+
+def test_mcp_transport_security_allowed_hosts_come_from_settings():
+    transport_security = mcp_server.mcp.settings.transport_security
+
+    assert transport_security.allowed_hosts == mcp_server.settings.mcp_allowed_hosts_list
+    assert transport_security.allowed_origins == mcp_server.settings.mcp_allowed_origins_list
