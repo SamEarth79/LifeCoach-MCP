@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -204,6 +204,29 @@ async def delete_goal(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Goal not found")
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_metadata(request: Request) -> dict:
+    app_settings = get_settings()
+    return {
+        "issuer": app_settings.supabase_url,
+        "authorization_endpoint": f"{app_settings.supabase_url}/auth/v1/oauth/authorize",
+        "token_endpoint": f"{app_settings.supabase_url}/auth/v1/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"],
+    }
+
+
+@app.get("/authorize")
+async def authorize_redirect(request: Request) -> RedirectResponse:
+    app_settings = get_settings()
+    supabase_authorize_url = f"{app_settings.supabase_url}/auth/v1/oauth/authorize"
+    query = request.url.query
+    if query:
+        supabase_authorize_url += "?" + query
+    return RedirectResponse(url=supabase_authorize_url)
 
 
 @app.get("/oauth/consent", response_class=HTMLResponse)
