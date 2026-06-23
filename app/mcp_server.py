@@ -2,6 +2,7 @@ import logging
 from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from pydantic import ValidationError
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-mcp = FastMCP("lifecoach", streamable_http_path="/", transport_security=None)
+mcp = FastMCP("lifecoach", streamable_http_path="/", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 
 
 @mcp.resource(
