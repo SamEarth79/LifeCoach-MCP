@@ -252,7 +252,14 @@ def test_handle_login_submit_error_path_only_sets_error_text_and_does_not_naviga
 
 
 def test_handle_login_submit_never_logs_or_echoes_submitted_credentials():
-    """Security: email/password values must never be logged or echoed anywhere."""
+    """Security: email/password values must never be logged or echoed anywhere.
+
+    console.error(error) IS allowed here - it logs only the Supabase SDK's
+    error object (a status/message, never the submitted credentials), so
+    failed-login diagnostics aren't completely invisible in the browser
+    console. What must never happen is the `email`/`password` variables
+    themselves reaching any console.* call or the rendered error text.
+    """
     html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
 
     handle_submit_start = html_output.index("async function lifecoachHandleLoginSubmit")
@@ -261,20 +268,18 @@ def test_handle_login_submit_never_logs_or_echoes_submitted_credentials():
     )
     handle_submit_body = html_output[handle_submit_start:handle_submit_end]
 
-    assert "console.log" not in handle_submit_body
-    assert "console.error" not in handle_submit_body
-    assert "console.warn" not in handle_submit_body
-
     error_branch = handle_submit_body.split("if (error)")[1].split("return;")[0]
     # The only allowed mention of "email"/"password" in the error path is the
     # fixed, generic literal string itself - never the `email`/`password`
-    # variables holding the user's actual submitted values.
+    # variables holding the user's actual submitted values, including
+    # inside the console.error(...) call itself.
     error_branch_without_generic_message = error_branch.replace(
         "Invalid email or password.", ""
     )
     assert "email" not in error_branch_without_generic_message
     assert "password" not in error_branch_without_generic_message
     assert 'errorEl.textContent = "Invalid email or password.";' in error_branch
+    assert "console.error(\"lifecoach oauth consent: signInWithPassword failed\", error)" in error_branch
 
 
 def test_no_signup_or_account_creation_text_anywhere_in_rendered_page():
@@ -356,6 +361,8 @@ def test_render_login_or_consent_routes_to_failure_state_when_details_fetch_erro
     )[0]
     assert "lifecoachRenderFailureState(" in error_branch
     assert "invalid or has expired" in error_branch
+    assert "console.error(" in error_branch
+    assert "authorizationId" in error_branch.split("console.error(")[1]
 
 
 def test_render_login_or_consent_routes_to_failure_state_when_get_authorization_details_throws():
@@ -372,6 +379,7 @@ def test_render_login_or_consent_routes_to_failure_state_when_get_authorization_
     catch_branch = render_login_or_consent_body.split("catch (caughtError)")[1]
     assert "lifecoachRenderFailureState(" in catch_branch
     assert "invalid or has expired" in catch_branch
+    assert "console.error(" in catch_branch
 
 
 def test_failure_state_helper_used_for_authorization_details_error_is_the_same_function_as_missing_id_case():
@@ -636,6 +644,7 @@ def test_handle_consent_decision_shows_retryable_error_on_missing_redirect_url()
     assert ".remove(" not in error_branch
     assert ".disabled" not in error_branch
     assert ".innerHTML" not in error_branch
+    assert "console.error(" in error_branch
 
 
 def test_handle_consent_decision_shows_retryable_error_when_sdk_call_throws():
@@ -655,6 +664,7 @@ def test_handle_consent_decision_shows_retryable_error_when_sdk_call_throws():
     assert "errorEl.textContent" in catch_branch
     assert "errorEl.hidden = false;" in catch_branch
     assert "window.location" not in catch_branch
+    assert "console.error(" in catch_branch
 
 
 def test_handle_consent_decision_clears_previous_error_state_at_start_of_each_attempt():

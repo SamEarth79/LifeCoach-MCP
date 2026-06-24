@@ -232,6 +232,7 @@ async function lifecoachHandleConsentDecision(client, authorizationId, decision)
         : await client.auth.oauth.denyAuthorization(authorizationId);
 
     if (error || !data || !data.redirect_url) {{
+      console.error("lifecoach oauth consent: " + decision + "Authorization failed", error, data);
       errorEl.textContent = "Something went wrong. Please try again.";
       errorEl.hidden = false;
       return;
@@ -239,6 +240,7 @@ async function lifecoachHandleConsentDecision(client, authorizationId, decision)
 
     window.location.href = data.redirect_url;
   }} catch (caughtError) {{
+    console.error("lifecoach oauth consent: " + decision + "Authorization threw", caughtError);
     errorEl.textContent = "Something went wrong. Please try again.";
     errorEl.hidden = false;
   }}
@@ -270,6 +272,7 @@ async function lifecoachHandleLoginSubmit(client, authorizationId) {{
   const {{ error }} = await client.auth.signInWithPassword({{ email, password }});
 
   if (error) {{
+    console.error("lifecoach oauth consent: signInWithPassword failed", error);
     const errorEl = document.getElementById("oauth-login-error");
     errorEl.textContent = "Invalid email or password.";
     errorEl.hidden = false;
@@ -295,6 +298,9 @@ async function renderLoginOrConsent(client, authorizationId) {{
     );
 
     if (error || !details) {{
+      console.error("lifecoach oauth consent: getAuthorizationDetails failed", error, {{
+        authorizationId: authorizationId,
+      }});
       lifecoachRenderFailureState(
         "This link is invalid or has expired. Please try connecting again from the app."
       );
@@ -303,6 +309,9 @@ async function renderLoginOrConsent(client, authorizationId) {{
 
     lifecoachRenderConsentScreen(client, authorizationId, details);
   }} catch (caughtError) {{
+    console.error("lifecoach oauth consent: getAuthorizationDetails threw", caughtError, {{
+      authorizationId: authorizationId,
+    }});
     lifecoachRenderFailureState(
       "This link is invalid or has expired. Please try connecting again from the app."
     );
