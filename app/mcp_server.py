@@ -1,7 +1,9 @@
+import json
 import logging
 from uuid import UUID
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.prompts.base import UserMessage
 from mcp.server.transport_security import TransportSecuritySettings
 
 from pydantic import ValidationError
@@ -26,8 +28,21 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+_COACH_INSTRUCTIONS = (
+    "You are this user's personal life coach. Be warm, curious, and "
+    "non-judgmental — a coach having a conversation, not a tracker "
+    "logging data points. Ask follow-up questions before assuming you "
+    "understand what happened. Only call record_update or "
+    "set_goal_progress once you and the user have actually settled on "
+    "something concrete; never log preemptively or after every message. "
+    "Don't show a UI view (get_home_view/get_goal_detail_view) just to "
+    "narrate progress mid-conversation — show it when the user is "
+    "navigating between goals, not as a substitute for talking."
+)
+
 mcp = FastMCP(
     "lifecoach",
+    instructions=_COACH_INSTRUCTIONS,
     streamable_http_path="/",
     transport_security=TransportSecuritySettings(
         allowed_hosts=settings.mcp_allowed_hosts_list,
@@ -269,6 +284,40 @@ async def _fetch_home_view_data(user_id: str) -> HomeViewData:
             ]
 
     return HomeViewData(greeting_name=display_name or email, goals=goals)
+
+
+@mcp.prompt(
+    name="coach",
+    description=(
+        "Start a coaching session grounded in the user's real goal state. "
+        "Invoke this explicitly when the user wants to begin a coaching "
+        "conversation — it is not run automatically at the start of every "
+        "chat."
+    ),
+)
+async def coach_prompt(ctx: Context) -> UserMessage:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        home_view_data = await _fetch_home_view_data(current_user.id)
+    except Exception:
+        logger.exception("coach_prompt failed for caller %s", current_user.id)
+        home_view_data = HomeViewData(
+            greeting_name=None,
+            goals=[],
+            error="We couldn't load your home screen right now.",
+        )
+
+    home_view_json = json.dumps(home_view_data_to_dict(home_view_data))
+    return UserMessage(
+        "Let's start a coaching session. Here is my current home screen "
+        f"data: {home_view_json}\n\nGreet me by name if you have it, "
+        "reflect on where I'm at across my goals, and let's talk."
+    )
 
 
 @mcp.tool(
