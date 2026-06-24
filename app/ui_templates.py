@@ -83,9 +83,10 @@ _STYLE = """
 }
 body {
   margin: 0;
-  background: #f7f3ee;
-  color: #3a352f;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  background: #fff8f4;
+  color: #1f1b17;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 .page {
   max-width: 480px;
@@ -94,13 +95,14 @@ body {
 }
 .greeting {
   font-size: 22px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   margin: 0 0 4px;
-  color: #2e2a25;
+  color: #1f1b17;
 }
 .subgreeting {
   font-size: 13px;
-  color: #8a8073;
+  color: #6b6259;
   margin: 0 0 24px;
 }
 .goal-list {
@@ -114,28 +116,29 @@ body {
   align-items: center;
   gap: 14px;
   background: #ffffff;
-  border-radius: 18px;
+  border-radius: 16px;
   padding: 16px 18px;
-  box-shadow: 0 1px 3px rgba(60, 50, 40, 0.06);
+  box-shadow: 0 1px 3px rgba(74, 69, 64, 0.04);
   cursor: pointer;
-  border: 1px solid #efe9e1;
+  border: 1px solid #ece3d8;
   text-align: left;
   width: 100%;
   font-family: inherit;
+  transition: box-shadow 0.15s ease;
 }
 .card:hover {
-  box-shadow: 0 2px 6px rgba(60, 50, 40, 0.1);
+  box-shadow: 0 4px 16px rgba(65, 99, 82, 0.08);
 }
 .card-title {
   flex: 1;
   font-size: 14px;
   font-weight: 500;
-  color: #3a352f;
+  color: #1f1b17;
 }
 .card-updated {
   display: block;
   font-size: 11px;
-  color: #a59a8c;
+  color: #a39a8f;
   margin-top: 2px;
   font-weight: 400;
 }
@@ -150,17 +153,17 @@ body {
 }
 .progress-ring-track {
   fill: none;
-  stroke: #efe9e1;
+  stroke: #e8ded1;
   stroke-width: 4;
 }
 .progress-ring-fill {
   fill: none;
-  stroke: #c98a5e;
+  stroke: #416352;
   stroke-width: 4;
   stroke-linecap: round;
 }
 .progress-ring-fill.no-estimate {
-  stroke: #cfc6b8;
+  stroke: #c1c8c2;
   stroke-dasharray: 2 4;
 }
 .progress-ring-label {
@@ -171,7 +174,7 @@ body {
   justify-content: center;
   font-size: 10px;
   font-weight: 600;
-  color: #6b6258;
+  color: #6b6259;
 }
 .entry-list {
   display: flex;
@@ -180,36 +183,36 @@ body {
   margin-top: 8px;
 }
 .entry-card {
-  border: 1.5px dashed #cbbfae;
-  border-radius: 16px;
+  border: 1.5px dashed #c1c8c2;
+  border-radius: 9999px;
   padding: 14px 18px;
   background: transparent;
   font-size: 14px;
-  font-weight: 500;
-  color: #7a6f5f;
+  font-weight: 600;
+  color: #416352;
   cursor: pointer;
-  text-align: left;
+  text-align: center;
   width: 100%;
   font-family: inherit;
 }
 .entry-card:hover {
-  background: #fbf8f3;
+  background: #fbf2eb;
 }
 .talk-entry {
   border: none;
-  border-radius: 16px;
+  border-radius: 9999px;
   padding: 14px 18px;
-  background: #ece4d8;
+  background: #416352;
   font-size: 14px;
-  font-weight: 500;
-  color: #5c5346;
+  font-weight: 600;
+  color: #ffffff;
   cursor: pointer;
-  text-align: left;
+  text-align: center;
   width: 100%;
   font-family: inherit;
 }
 .talk-entry:hover {
-  background: #e4dac9;
+  background: #355445;
 }
 .empty-state {
   padding: 32px 0 8px;
@@ -236,9 +239,10 @@ body {
 _DETAIL_STYLE = """
 .detail-title {
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   margin: 0 0 4px;
-  color: #2e2a25;
+  color: #1f1b17;
 }
 .detail-header {
   display: flex;
@@ -249,7 +253,7 @@ _DETAIL_STYLE = """
 .detail-description {
   font-size: 14px;
   line-height: 1.5;
-  color: #5c5346;
+  color: #6b6259;
   margin: 0 0 24px;
   white-space: pre-wrap;
 }
@@ -257,8 +261,8 @@ _DETAIL_STYLE = """
   font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #a59a8c;
+  letter-spacing: 0.05em;
+  color: #a39a8f;
   margin: 0 0 10px;
 }
 .update-list {
@@ -269,19 +273,19 @@ _DETAIL_STYLE = """
 }
 .update-item {
   background: #ffffff;
-  border: 1px solid #efe9e1;
-  border-radius: 14px;
+  border: 1px solid #ece3d8;
+  border-radius: 12px;
   padding: 12px 16px;
 }
 .update-content {
   font-size: 13px;
-  color: #3a352f;
+  color: #1f1b17;
   margin: 0 0 4px;
   white-space: pre-wrap;
 }
 .update-date {
   font-size: 11px;
-  color: #a59a8c;
+  color: #a39a8f;
 }
 .no-updates {
   font-size: 13px;
@@ -295,30 +299,30 @@ _DETAIL_STYLE = """
 }
 .continue-entry {
   border: none;
-  border-radius: 16px;
+  border-radius: 9999px;
   padding: 14px 18px;
-  background: #ece4d8;
+  background: #416352;
   font-size: 14px;
-  font-weight: 500;
-  color: #5c5346;
+  font-weight: 600;
+  color: #ffffff;
   cursor: pointer;
-  text-align: left;
+  text-align: center;
   width: 100%;
   font-family: inherit;
 }
 .continue-entry:hover {
-  background: #e4dac9;
+  background: #355445;
 }
 .delete-entry {
-  border: 1.5px dashed #cbbfae;
-  border-radius: 16px;
+  border: 1.5px dashed #ddc6bc;
+  border-radius: 9999px;
   padding: 14px 18px;
   background: transparent;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   color: #9a5a45;
   cursor: pointer;
-  text-align: left;
+  text-align: center;
   width: 100%;
   font-family: inherit;
 }
@@ -329,7 +333,7 @@ _DETAIL_STYLE = """
   display: flex;
   align-items: center;
   gap: 10px;
-  border-radius: 16px;
+  border-radius: 14px;
   padding: 14px 18px;
   background: #f6ece6;
 }
@@ -340,8 +344,8 @@ _DETAIL_STYLE = """
 }
 .delete-confirm-btn {
   border: none;
-  border-radius: 10px;
-  padding: 8px 14px;
+  border-radius: 9999px;
+  padding: 8px 16px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -353,7 +357,7 @@ _DETAIL_STYLE = """
 }
 .delete-confirm-btn.cancel {
   background: #eee2da;
-  color: #6b6258;
+  color: #6b6259;
 }
 .hidden {
   display: none;
@@ -577,6 +581,7 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>""" + _STYLE + """</style>
 </head>
 <body>
@@ -597,6 +602,7 @@ _DETAIL_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>""" + _STYLE + _DETAIL_STYLE + """</style>
 </head>
 <body>
