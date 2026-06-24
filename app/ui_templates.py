@@ -85,7 +85,7 @@ body {
   margin: 0;
   background: #fff8f4;
   color: #1f1b17;
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 .page {
@@ -281,7 +281,10 @@ _DETAIL_STYLE = """
   font-size: 13px;
   color: #1f1b17;
   margin: 0 0 4px;
-  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .update-date {
   font-size: 11px;
@@ -581,7 +584,6 @@ _HOME_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>""" + _STYLE + """</style>
 </head>
 <body>
@@ -602,7 +604,6 @@ _DETAIL_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>""" + _STYLE + _DETAIL_STYLE + """</style>
 </head>
 <body>

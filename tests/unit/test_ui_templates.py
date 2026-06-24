@@ -120,6 +120,27 @@ def test_render_goal_detail_view_includes_render_functions():
     assert "function escapeHtml(" in html_output
 
 
+def test_render_views_load_no_external_resources():
+    """Real bug: MCP Apps run inside a sandboxed iframe with a restrictive
+    default CSP that blocks external resources (fonts, scripts, etc.)
+    unless explicitly declared via connectDomains/resourceDomains in the
+    resource's _meta.ui.csp - which we don't declare. A Google Fonts
+    <link> added during a redesign was silently blocked, and the rest of
+    the stylesheet rendered as if unstyled in real Claude Desktop testing.
+    These templates must rely only on system fonts and inline styles -
+    no external <link>/<script src> to a third-party domain."""
+    for html_output in (render_home_view(), render_goal_detail_view()):
+        assert "fonts.googleapis.com" not in html_output
+        assert "<link " not in html_output
+
+
+def test_render_goal_detail_view_clamps_update_content_to_a_couple_of_lines():
+    html_output = render_goal_detail_view()
+
+    assert "-webkit-line-clamp: 2" in html_output
+    assert "-webkit-box-orient: vertical" in html_output
+
+
 def test_render_home_view_wires_tool_result_callback_to_render_home_view():
     html_output = render_home_view()
 
