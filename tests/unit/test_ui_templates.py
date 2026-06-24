@@ -146,6 +146,43 @@ def test_render_goal_detail_view_includes_render_functions():
     assert "function escapeHtml(" in html_output
 
 
+def test_render_home_view_includes_goal_detail_specific_styles():
+    """Real bug: clicking a goal card from the home view does a client-side
+    el.innerHTML = renderGoalDetailView(d) swap *inside the home page's own
+    document* (see goalCard's onclick) - it never loads the separate
+    ui://goal-detail-view resource. So if goal-detail-only CSS classes
+    (.detail-title, .continue-entry, .update-item, etc.) only exist in a
+    style block the home page never includes, the swapped-in detail markup
+    renders with zero matching CSS - exactly what was observed live: the
+    progress ring (shared style) looked fine, everything detail-specific
+    didn't. Both templates must carry the same single combined stylesheet
+    so this works regardless of which path renders the detail markup."""
+    home_html = render_home_view()
+
+    for css_class in (
+        ".detail-title",
+        ".detail-description",
+        ".section-label",
+        ".update-item",
+        ".update-content",
+        ".no-updates",
+        ".continue-entry",
+        ".delete-entry",
+        ".delete-confirm",
+    ):
+        assert css_class in home_html
+
+
+def test_home_and_detail_views_share_the_exact_same_stylesheet():
+    home_html = render_home_view()
+    detail_html = render_goal_detail_view()
+
+    home_style = home_html.split("<style>")[1].split("</style>")[0]
+    detail_style = detail_html.split("<style>")[1].split("</style>")[0]
+
+    assert home_style == detail_style
+
+
 def test_render_views_load_no_external_resources():
     """Real bug: MCP Apps run inside a sandboxed iframe with a restrictive
     default CSP that blocks external resources (fonts, scripts, etc.)
@@ -207,6 +244,77 @@ def test_render_home_view_never_mentions_transcript():
 
 def test_render_goal_detail_view_never_mentions_transcript():
     assert "transcript" not in render_goal_detail_view().lower()
+
+
+# ---------------------------------------------------------------------------
+# formatDate JS implementation: "Jul 12" style, not raw ISO "2026-07-12"
+# ---------------------------------------------------------------------------
+
+
+def _extract_function_body(html_output: str, signature: str) -> str:
+    start = html_output.index(signature)
+    open_brace = html_output.index("{", start)
+    depth = 0
+    i = open_brace
+    while True:
+        if html_output[i] == "{":
+            depth += 1
+        elif html_output[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    return html_output[open_brace : i + 1]
+
+
+def _simulate_format_date(iso_string: str | None) -> str:
+    """Pure-Python mirror of the embedded JS formatDate function, same
+    approach used for lifecoachEscapeHtml elsewhere in this codebase."""
+    if not iso_string:
+        return ""
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    date_part = iso_string.split("T")[0]
+    parts = date_part.split("-")
+    if len(parts) != 3:
+        return date_part
+    try:
+        month = months[int(parts[1]) - 1]
+        day = int(parts[2])
+    except (ValueError, IndexError):
+        return date_part
+    return f"{month} {day}"
+
+
+def test_format_date_renders_month_abbreviation_and_day_not_raw_iso():
+    assert _simulate_format_date("2026-07-12T10:00:00+00:00") == "Jul 12"
+    assert _simulate_format_date("2026-01-05") == "Jan 5"
+    assert _simulate_format_date("2026-12-31T23:59:59+00:00") == "Dec 31"
+
+
+def test_format_date_handles_missing_value():
+    assert _simulate_format_date(None) == ""
+    assert _simulate_format_date("") == ""
+
+
+def test_render_home_view_format_date_function_present_and_used_by_updated_line():
+    html_output = render_home_view()
+
+    assert "function formatDate(" in html_output
+    format_date_body = _extract_function_body(html_output, "function formatDate(")
+    assert '"Jan", "Feb", "Mar"' in format_date_body
+
+    updated_line_body = _extract_function_body(html_output, "function updatedLine(")
+    assert "formatDate(lastUpdatedAt)" in updated_line_body
+    assert 'split("T")[0]' not in updated_line_body
+
+
+def test_render_goal_detail_view_uses_format_date_for_update_dates():
+    html_output = render_goal_detail_view()
+
+    detail_fn_start = html_output.index("function renderGoalDetailView(")
+    detail_fn = html_output[detail_fn_start : detail_fn_start + 2000]
+
+    assert "formatDate(u.createdAt)" in detail_fn
 
 
 # ---------------------------------------------------------------------------
