@@ -346,6 +346,54 @@ def test_render_login_or_consent_routes_to_consent_screen_on_successful_details_
     assert "lifecoachRenderConsentScreen(client, authorizationId, details)" in render_login_or_consent_body
 
 
+def test_render_login_or_consent_redirects_immediately_when_already_approved():
+    """getAuthorizationDetails returns a union type per the real supabase-js
+    SDK: OAuthAuthorizationDetails (has authorization_id, client, scope) when
+    consent is still needed, or OAuthRedirect (redirect_url only, no client
+    field at all) when the user already approved this OAuth client in a
+    prior session. Reading details.client.name unconditionally crashes with
+    a TypeError on the second shape - this must be detected and handled by
+    redirecting immediately, not by trying to render a consent screen."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    render_login_or_consent_body = _extract_function_body(
+        html_output, "async function renderLoginOrConsent", "function lifecoachInit"
+    )
+
+    assert '!("authorization_id" in details)' in render_login_or_consent_body
+    already_approved_branch = render_login_or_consent_body.split(
+        '!("authorization_id" in details)'
+    )[1].split("lifecoachRenderConsentScreen(")[0]
+
+    assert "window.location.href = details.redirect_url;" in already_approved_branch
+    # Checked and routed to the shared failure-state helper before ever
+    # dereferencing details.client - never throws if redirect_url is also
+    # absent from this response shape.
+    assert "if (!details.redirect_url)" in already_approved_branch
+    assert "lifecoachRenderFailureState(" in already_approved_branch
+    assert "details.client" not in already_approved_branch
+
+
+def test_render_login_or_consent_does_not_redirect_when_consent_still_needed():
+    """The already-approved redirect branch must not fire for a normal
+    OAuthAuthorizationDetails response (has authorization_id) - that case
+    still falls through to the consent screen, unchanged from before."""
+    html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
+
+    render_login_or_consent_body = _extract_function_body(
+        html_output, "async function renderLoginOrConsent", "function lifecoachInit"
+    )
+
+    already_approved_check_index = render_login_or_consent_body.index(
+        '!("authorization_id" in details)'
+    )
+    consent_screen_call_index = render_login_or_consent_body.index(
+        "lifecoachRenderConsentScreen(client, authorizationId, details)"
+    )
+
+    assert already_approved_check_index < consent_screen_call_index
+
+
 def test_render_login_or_consent_routes_to_failure_state_when_details_fetch_errors():
     """AC5: an error/missing-details response renders the SAME failure-state helper
     used for the missing-authorization_id case, not a new parallel implementation."""
@@ -383,18 +431,18 @@ def test_render_login_or_consent_routes_to_failure_state_when_get_authorization_
 
 
 def test_failure_state_helper_used_for_authorization_details_error_is_the_same_function_as_missing_id_case():
-    """AC5: confirms reuse, not drift — the literal failure message used for both
-    the getAuthorizationDetails error branch and its catch block is byte-identical
-    to the one used for the missing-authorization_id case, and all three call
-    sites invoke the single shared helper function rather than a new parallel one."""
+    """AC5: confirms reuse, not drift — the literal failure message used across
+    every failure branch is byte-identical, and all call sites invoke the
+    single shared helper function rather than a new parallel one."""
     html_output = render_oauth_consent_page("https://example.supabase.co", "anon-key")
 
     failure_message = "This link is invalid or has expired. Please try connecting again from the app."
-    # Three call sites share this exact literal message: the missing-authorization_id
-    # branch (lifecoachInit), the getAuthorizationDetails error branch, and its
-    # catch block (both in renderLoginOrConsent) -- all invoking the one shared helper.
-    assert html_output.count(failure_message) == 3
-    assert html_output.count("lifecoachRenderFailureState(\n") == 3
+    # Four call sites share this exact literal message: the missing-authorization_id
+    # branch (lifecoachInit), the getAuthorizationDetails error branch, its catch
+    # block, and the already-approved-but-missing-redirect_url edge case (all three
+    # in renderLoginOrConsent) -- all invoking the one shared helper.
+    assert html_output.count(failure_message) == 4
+    assert html_output.count("lifecoachRenderFailureState(\n") == 4
     assert html_output.count("function lifecoachRenderFailureState(") == 1
 
 

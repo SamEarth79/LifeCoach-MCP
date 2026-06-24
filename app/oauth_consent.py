@@ -307,6 +307,26 @@ async function renderLoginOrConsent(client, authorizationId) {{
       return;
     }}
 
+    if (!("authorization_id" in details)) {{
+      // The user already approved this OAuth client in a prior session.
+      // getAuthorizationDetails returns an OAuthRedirect (redirect_url
+      // only) instead of OAuthAuthorizationDetails (client, scope, etc.)
+      // in this case - there is no consent screen to show, just redirect.
+      if (!details.redirect_url) {{
+        console.error(
+          "lifecoach oauth consent: already-approved response missing redirect_url",
+          details,
+          {{ authorizationId: authorizationId }}
+        );
+        lifecoachRenderFailureState(
+          "This link is invalid or has expired. Please try connecting again from the app."
+        );
+        return;
+      }}
+      window.location.href = details.redirect_url;
+      return;
+    }}
+
     lifecoachRenderConsentScreen(client, authorizationId, details);
   }} catch (caughtError) {{
     console.error("lifecoach oauth consent: getAuthorizationDetails threw", caughtError, {{
