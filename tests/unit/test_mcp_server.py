@@ -1244,3 +1244,78 @@ def test_mcp_transport_security_allowed_hosts_come_from_settings():
 
     assert transport_security.allowed_hosts == mcp_server.settings.mcp_allowed_hosts_list
     assert transport_security.allowed_origins == mcp_server.settings.mcp_allowed_origins_list
+
+
+def test_server_instructions_set_persona_and_logging_judgment_not_session_kickoff():
+    # instructions apply to every connection with no way to gate them behind
+    # explicit user action, so they must only carry passive tone/judgment
+    # guidance - never a "call get_home_view at session start" directive,
+    # which belongs to the explicit coach prompt instead.
+    instructions = mcp_server.mcp.instructions
+
+    assert instructions is not None
+    assert "coach" in instructions.lower()
+    assert "record_update" in instructions
+    assert "set_goal_progress" in instructions
+    assert "session start" not in instructions.lower()
+    assert "every chat" not in instructions.lower()
+    assert "every conversation" not in instructions.lower()
+
+
+def test_coach_prompt_is_registered_and_not_auto_invoked():
+    prompt = mcp_server.mcp._prompt_manager._prompts["coach"]
+
+    assert prompt.name == "coach"
+    assert "explicit" in prompt.description.lower() or "not run automatically" in prompt.description.lower()
+
+
+@pytest.mark.asyncio
+async def test_coach_prompt_returns_user_message_embedding_real_home_view_data(monkeypatch):
+    user_row = ("Sam", "user@example.com")
+    goal_rows = [("33333333-3333-3333-3333-333333333333", "Run a 5k", 42)]
+    last_updated_rows = [("33333333-3333-3333-3333-333333333333", datetime(2026, 1, 1, tzinfo=timezone.utc))]
+    fake_connection = _SequencedConnection([user_row, goal_rows, last_updated_rows])
+
+    @asynccontextmanager
+    async def fake_get_rls_connection(_user_id):
+        yield fake_connection
+
+    monkeypatch.setattr(mcp_server, "get_rls_connection", fake_get_rls_connection)
+    monkeypatch.setattr(
+        mcp_server,
+        "verify_bearer_token",
+        AsyncMock(return_value=CurrentUser(id="11111111-1111-1111-1111-111111111111", email="user@example.com")),
+    )
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", AsyncMock(return_value=None))
+
+    request = SimpleNamespace(headers={"authorization": "Bearer token"})
+    ctx = SimpleNamespace(request_context=SimpleNamespace(request=request))
+
+    message = await mcp_server.coach_prompt(ctx)
+
+    assert message.role == "user"
+    assert "Sam" in message.content.text
+    assert "Run a 5k" in message.content.text
+
+
+@pytest.mark.asyncio
+async def test_coach_prompt_shows_generic_error_when_home_view_fetch_fails(monkeypatch):
+    monkeypatch.setattr(
+        mcp_server,
+        "verify_bearer_token",
+        AsyncMock(return_value=CurrentUser(id="11111111-1111-1111-1111-111111111111", email="user@example.com")),
+    )
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", AsyncMock(return_value=None))
+
+    async def _raise_fetch(_user_id):
+        raise RuntimeError("db unavailable")
+
+    monkeypatch.setattr(mcp_server, "_fetch_home_view_data", _raise_fetch)
+
+    request = SimpleNamespace(headers={"authorization": "Bearer token"})
+    ctx = SimpleNamespace(request_context=SimpleNamespace(request=request))
+
+    message = await mcp_server.coach_prompt(ctx)
+
+    assert "couldn't load your home screen" in message.content.text
+    assert "Traceback" not in message.content.text
