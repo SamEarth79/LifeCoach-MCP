@@ -234,9 +234,6 @@ body {
   color: #8a5a3c;
   margin-bottom: 20px;
 }
-"""
-
-_DETAIL_STYLE = """
 .detail-title {
   font-size: 20px;
   font-weight: 700;
@@ -484,10 +481,20 @@ function progressRing(percent) {
     '</svg><span class="progress-ring-label">' + percent + '%</span></div>';
 }
 
+function formatDate(isoString) {
+  if (!isoString) return "";
+  var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var dateParts = isoString.split("T")[0].split("-");
+  if (dateParts.length !== 3) return isoString.split("T")[0];
+  var month = months[parseInt(dateParts[1], 10) - 1];
+  var day = parseInt(dateParts[2], 10);
+  if (!month || !day) return isoString.split("T")[0];
+  return month + " " + day;
+}
+
 function updatedLine(lastUpdatedAt) {
   if (!lastUpdatedAt) return "";
-  var dateOnly = lastUpdatedAt.split("T")[0];
-  return '<span class="card-updated">Updated ' + escapeHtml(dateOnly) + '</span>';
+  return '<span class="card-updated">Updated ' + escapeHtml(formatDate(lastUpdatedAt)) + '</span>';
 }
 
 function escapeHtml(s) {
@@ -551,9 +558,8 @@ function renderGoalDetailView(data) {
     for (var i = 0; i < data.recentUpdates.length; i++) {
       var u = data.recentUpdates[i];
       var safeContent = escapeHtml(u.content);
-      var dateOnly = (u.createdAt || "").split("T")[0];
       html += '<div class="update-item"><p class="update-content">' + safeContent + '</p>' +
-        '<span class="update-date">' + escapeHtml(dateOnly) + '</span></div>';
+        '<span class="update-date">' + escapeHtml(formatDate(u.createdAt)) + '</span></div>';
     }
     html += '</div>';
   } else {
@@ -623,7 +629,7 @@ _DETAIL_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>""" + _STYLE + _DETAIL_STYLE + """</style>
+<style>""" + _STYLE + """</style>
 </head>
 <body>
 <div class="page" id="root"></div>
