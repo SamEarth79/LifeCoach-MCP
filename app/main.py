@@ -1,5 +1,7 @@
+import logging
 from uuid import UUID
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from slowapi import _rate_limit_exceeded_handler
@@ -12,6 +14,8 @@ from app.mcp_server import mcp
 from app.oauth_consent import render_oauth_consent_page
 from app.rate_limit import get_client_ip, limiter, per_ip_rate_limit, settings
 from app.schemas import GoalCreate, GoalResponse, GoalUpdate
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="LifeCoach API")
 app.state.limiter = limiter
@@ -208,15 +212,29 @@ async def delete_goal(
 
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_metadata(request: Request) -> dict:
+    """Mirror Supabase's real OAuth authorization server metadata.
+
+    Previously hand-copied a subset of fields into a static dict, which
+    silently omitted `token_endpoint_auth_methods_supported` and drifted
+    from Supabase's actual metadata whenever it changed. Fetching live
+    means this can never go stale and always reflects exactly what
+    Supabase's real token endpoint actually accepts.
+    """
     app_settings = get_settings()
-    return {
-        "issuer": app_settings.supabase_url,
-        "authorization_endpoint": f"{app_settings.supabase_url}/auth/v1/oauth/authorize",
-        "token_endpoint": f"{app_settings.supabase_url}/auth/v1/oauth/token",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
-        "code_challenge_methods_supported": ["S256"],
-    }
+    metadata_url = f"{app_settings.supabase_url}/auth/v1/.well-known/oauth-authorization-server"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.get(metadata_url)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error("Failed to fetch Supabase OAuth metadata from %s: %s", metadata_url, exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OAuth metadata is temporarily unavailable",
+            ) from exc
+
+    return response.json()
 
 
 @app.get("/authorize")
