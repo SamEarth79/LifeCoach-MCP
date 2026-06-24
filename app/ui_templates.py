@@ -388,6 +388,17 @@ _BRIDGE_JS = """
     });
   }
 
+  function reportSize() {
+    var root = document.getElementById("root");
+    if (!root) return;
+    var rect = root.getBoundingClientRect();
+    window.parent.postMessage({
+      jsonrpc: "2.0",
+      method: "ui/notifications/size-changed",
+      params: { width: Math.ceil(rect.width), height: Math.ceil(rect.height) }
+    }, "*");
+  }
+
   window.addEventListener("message", function(event) {
     var msg = event.data;
     if (!msg || msg.jsonrpc !== "2.0") return;
@@ -402,6 +413,7 @@ _BRIDGE_JS = """
         if (typeof onToolResult === 'function') onToolResult(BUFFERED);
         BUFFERED = null;
       }
+      reportSize();
       return;
     }
 
@@ -437,6 +449,13 @@ _BRIDGE_JS = """
       content: [{ type: "text", text: text }]
     });
   };
+
+  if (typeof ResizeObserver !== 'undefined') {
+    var lifecoachRootEl = document.getElementById("root");
+    if (lifecoachRootEl) {
+      new ResizeObserver(reportSize).observe(lifecoachRootEl);
+    }
+  }
 })();
 """
 

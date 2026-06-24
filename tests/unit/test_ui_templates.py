@@ -94,6 +94,32 @@ def test_render_home_view_includes_bridge_js_initialize_handshake():
     assert "window.sendMessage" in html_output
 
 
+def test_render_home_view_reports_size_changes_to_host():
+    """Without this, the host has no way to know how tall the actual
+    content is and falls back to a default-sized iframe, forcing the user
+    to scroll. Per the MCP Apps spec (SEP-1865), the view must notify the
+    host via ui/notifications/size-changed - both right after the
+    ui/initialize handshake and on every subsequent content size change
+    (e.g. via ResizeObserver), since re-renders (home -> goal detail,
+    delete-confirm expanding) change the content height after init."""
+    html_output = render_home_view()
+
+    assert 'method: "ui/notifications/size-changed"' in html_output
+    assert "reportSize()" in html_output
+    assert "new ResizeObserver(reportSize)" in html_output
+    assert "getBoundingClientRect()" in html_output
+
+    init_branch = html_output.split('msg.id === "__init__"')[1].split("return;")[0]
+    assert "reportSize();" in init_branch
+
+
+def test_render_goal_detail_view_reports_size_changes_to_host():
+    html_output = render_goal_detail_view()
+
+    assert 'method: "ui/notifications/size-changed"' in html_output
+    assert "new ResizeObserver(reportSize)" in html_output
+
+
 def test_render_goal_detail_view_includes_bridge_js_initialize_handshake():
     html_output = render_goal_detail_view()
 
