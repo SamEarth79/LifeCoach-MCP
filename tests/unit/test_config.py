@@ -64,3 +64,40 @@ def test_rate_limit_settings_are_overridable_via_environment_variables(monkeypat
 
     assert settings.rate_limit_requests == 5
     assert settings.rate_limit_window_seconds == 10
+
+
+def test_mcp_allowed_hosts_default_to_localhost_for_local_dev(monkeypatch):
+    for key, value in ENV_VARS.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("MCP_ALLOWED_ORIGINS", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.mcp_allowed_hosts_list == ["localhost:8001", "127.0.0.1:8001"]
+    assert settings.mcp_allowed_origins_list == [
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
+    ]
+
+
+def test_mcp_allowed_hosts_overridable_via_environment_variable(monkeypatch):
+    for key, value in ENV_VARS.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "lifecoach-api.onrender.com")
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://lifecoach-api.onrender.com")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.mcp_allowed_hosts_list == ["lifecoach-api.onrender.com"]
+    assert settings.mcp_allowed_origins_list == ["https://lifecoach-api.onrender.com"]
+
+
+def test_mcp_allowed_hosts_list_splits_and_strips_comma_separated_values(monkeypatch):
+    for key, value in ENV_VARS.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "host-a.com, host-b.com ,host-c.com")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.mcp_allowed_hosts_list == ["host-a.com", "host-b.com", "host-c.com"]

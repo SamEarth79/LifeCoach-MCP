@@ -11,3 +11,7 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: MCP_ALLOWED_HOSTS
+        value: lifecoach-api.onrender.com
+      - key: MCP_ALLOWED_ORIGINS
+        value: https://lifecoach-api.onrender.com
