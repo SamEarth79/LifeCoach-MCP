@@ -10,7 +10,7 @@ from app.auth import verify_bearer_token
 from app.config import get_settings
 from app.db import get_rls_connection
 from app.rate_limit import enforce_mcp_rate_limit
-from app.schemas import GoalProgressUpdate, UpdateCreate, UpdateListItem
+from app.schemas import GoalCreate, GoalProgressUpdate, UpdateCreate, UpdateListItem
 from app.ui_templates import (
     GoalDetailUpdate,
     GoalDetailViewData,
@@ -392,6 +392,54 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
 
 @mcp.tool(
     description=(
+        "Create a new goal for the user. Call this once you and the user "
+        "have actually agreed on a clear title for what they want to work "
+        "on — not before they've described it. Optionally include a short "
+        "`description` capturing what they want to achieve, their "
+        "timeline, or why it matters, if they shared that. On success, "
+        "returns a refreshed home screen UI resource reflecting the new "
+        "goal."
+    )
+)
+async def create_goal(title: str, ctx: Context, description: str | None = None) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        goal = GoalCreate(title=title, description=description)
+    except ValidationError as exc:
+        logger.warning("create_goal validation failed: %s", exc)
+        raise ValueError(str(exc)) from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO goals (user_id, title, description)
+                VALUES (%s, %s, %s)
+                """,
+                (current_user.id, goal.title, goal.description),
+            )
+        await conn.commit()
+
+    try:
+        home_view_data = await _fetch_home_view_data(current_user.id)
+    except Exception:
+        logger.exception("create_goal: refreshing home view failed for caller %s", current_user.id)
+        return {
+            "greetingName": None,
+            "goals": [],
+            "error": "We couldn't load your home screen right now.",
+        }
+
+    return home_view_data_to_dict(home_view_data)
+
+
+@mcp.tool(
+    description=(
         "Soft-delete one of the user's own goals. This is intended to be "
         "called from the goal-detail view's confirm-delete UI action after "
         "the user has explicitly confirmed, not something you should "
@@ -446,3 +494,4 @@ async def delete_goal(goal_id: str, ctx: Context) -> dict:
 mcp._tool_manager._tools["get_home_view"].meta = {"ui": {"resourceUri": "ui://home-view"}}
 mcp._tool_manager._tools["get_goal_detail_view"].meta = {"ui": {"resourceUri": "ui://goal-detail-view"}}
 mcp._tool_manager._tools["delete_goal"].meta = {"ui": {"resourceUri": "ui://home-view"}}
+mcp._tool_manager._tools["create_goal"].meta = {"ui": {"resourceUri": "ui://home-view"}}

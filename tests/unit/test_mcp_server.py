@@ -1147,6 +1147,144 @@ def test_delete_goal_tool_description_states_called_from_ui_confirm_step_not_pro
 
 
 @pytest.mark.asyncio
+async def test_create_goal_inserts_row_with_verified_user_id_title_and_description(monkeypatch):
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.create_goal(
+        title="Run a 5k",
+        description="Train three times a week",
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    insert_query, insert_params = fake_connection.cursor_instance.executed[0]
+    assert "INSERT INTO goals" in insert_query
+    assert insert_params == (USER_ID, "Run a 5k", "Train three times a week")
+    assert fake_connection.committed is True
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_create_goal_rejects_blank_title_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.create_goal(title="   ", ctx=_fake_context("Bearer faketoken"))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_create_goal_allows_omitted_description(monkeypatch):
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.create_goal(title="Run a 5k", ctx=_fake_context("Bearer faketoken"))
+
+    _, insert_params = fake_connection.cursor_instance.executed[0]
+    assert insert_params == (USER_ID, "Run a 5k", None)
+
+
+@pytest.mark.asyncio
+async def test_create_goal_rejects_missing_authorization_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch, side_effect=PermissionError("unauthorized"))
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(PermissionError):
+        await mcp_server.create_goal(title="Run a 5k", ctx=_fake_context(None))
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_create_goal_enforces_rate_limit_before_jwt_verification(monkeypatch):
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    _patch_db_sequenced(monkeypatch, refresh_responses)
+    call_order = []
+
+    async def _record_rate_limit(*_args, **_kwargs):
+        call_order.append("rate_limit")
+
+    async def _record_auth(*_args, **_kwargs):
+        call_order.append("auth")
+        return CurrentUser(id=USER_ID, email="user@example.com")
+
+    monkeypatch.setattr(mcp_server, "enforce_mcp_rate_limit", AsyncMock(side_effect=_record_rate_limit))
+    monkeypatch.setattr(mcp_server, "verify_bearer_token", AsyncMock(side_effect=_record_auth))
+
+    await mcp_server.create_goal(title="Run a 5k", ctx=_fake_context("Bearer faketoken"))
+
+    assert call_order == ["rate_limit", "auth"]
+
+
+@pytest.mark.asyncio
+async def test_create_goal_on_success_returns_refreshed_home_view_including_new_goal(monkeypatch):
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Get 5000 LinkedIn followers", None)], []]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.create_goal(
+        title="Get 5000 LinkedIn followers",
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    assert isinstance(result, dict)
+    assert "Get 5000 LinkedIn followers" in str(result)
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_create_goal_returns_same_dict_shape_as_get_home_view(monkeypatch):
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    _patch_db_sequenced(monkeypatch, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    create_result = await mcp_server.create_goal(title="Run a 5k", ctx=_fake_context("Bearer faketoken"))
+
+    home_view_responses = [("Sam", "sam@example.com"), []]
+    _patch_db_sequenced(monkeypatch, home_view_responses)
+
+    home_view_result = await mcp_server.get_home_view(ctx=_fake_context("Bearer faketoken"))
+
+    assert set(create_result.keys()) == set(home_view_result.keys())
+    assert type(create_result) is type(home_view_result)
+
+
+@pytest.mark.asyncio
+async def test_create_goal_success_path_uses_shared_fetch_home_view_data_helper():
+    import inspect
+
+    create_source = inspect.getsource(mcp_server.create_goal)
+
+    assert "_fetch_home_view_data" in create_source
+    assert "home_view_data_to_dict" in create_source
+
+
+def test_create_goal_tool_description_instructs_caller_on_when_to_call_it():
+    tool = mcp_server.mcp._tool_manager._tools["create_goal"]
+
+    description = tool.description.lower()
+
+    assert "title" in description
+    assert "agreed" in description or "described" in description
+
+
+def test_create_goal_tool_declares_home_view_ui_resource_uri_in_meta():
+    tool = mcp_server.mcp._tool_manager._tools["create_goal"]
+
+    assert tool.meta == {"ui": {"resourceUri": "ui://home-view"}}
+
+
+@pytest.mark.asyncio
 async def test_home_view_resource_is_registered_under_ui_home_view_uri():
     resources = await mcp_server.mcp.list_resources()
     resource_uris = {str(resource.uri) for resource in resources}
