@@ -1400,6 +1400,18 @@ def test_server_instructions_set_persona_and_logging_judgment_not_session_kickof
     assert "every conversation" not in instructions.lower()
 
 
+def test_server_instructions_tell_claude_to_set_progress_alongside_every_update():
+    # Real gap: goals have no numeric target field, so progress_percent is
+    # never computed automatically - it stays blank (rendered as a dash)
+    # forever unless Claude calls set_goal_progress itself. Without an
+    # explicit nudge here, Claude was observed not calling it reliably.
+    instructions = mcp_server.mcp.instructions
+
+    assert "whenever you call record_update" in instructions.lower()
+    assert "also call set_goal_progress" in instructions.lower()
+    assert "no numeric target" in instructions.lower()
+
+
 def test_coach_prompt_is_registered_and_not_auto_invoked():
     prompt = mcp_server.mcp._prompt_manager._prompts["coach"]
 
