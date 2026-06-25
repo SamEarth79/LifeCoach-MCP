@@ -536,6 +536,9 @@ A plain `dict`:
   "recentUpdates": [
     {"content": "Ran 3 miles today", "createdAt": "2026-06-21T09:00:00.000000+00:00"}
   ],
+  "todos": [
+    {"id": "b2c3d4e5-58cc-4372-a567-0e02b2c3d479", "text": "Buy running shoes", "done": false, "sortOrder": 0}
+  ],
   "error": null
 }
 ```
@@ -544,6 +547,13 @@ A plain `dict`:
 `transcript`, same discipline as `list_updates`. `recentUpdates` is `[]`,
 not an error, when the goal has no updates yet — the client-side renderer
 displays "No updates yet." for this case.
+
+`todos` carries `id`, `text`, `done`, `sortOrder` per item, ordered by
+`sortOrder` ascending. `todos` is `[]`, not an error, when the goal has no
+todos — the client-side renderer omits the checklist section entirely in
+that case (no empty wrapper, no "Checklist" label). Each item's checkbox
+calls `toggle_todo` directly via `window.callTool` — see that tool's entry
+below.
 
 On a handled failure (goal missing/not owned/soft-deleted, or any
 unhandled error while loading), the dict instead has only an `error` key
@@ -649,6 +659,313 @@ itself uses, not a parallel implementation. Previously the same
 | `goal_id` is not a valid UUID | Validation error raised before any database call. |
 | `goal_id` does not exist, is not owned by the caller, or is already soft-deleted | The RLS-scoped `UPDATE` returns no row; the tool raises an error with no commit and no home-view refresh attempted. |
 | The post-delete home-view refresh itself fails (e.g. an unhandled error reading the caller's updated goal list) | Handled internally — returns `{"greetingName": null, "goals": [], "error": "We couldn't load your home screen right now."}` rather than raising, even though the delete itself already succeeded and committed. |
+
+---
+
+### Tool: `create_goal`
+
+Creates a goal owned by the caller — the MCP equivalent of `POST /goals`,
+intended to be called once the AI and the user have agreed on a clear title
+for what they want to work on. Optionally accepts `todos`, a list of
+suggested subgoal-style first steps to persist in the same call; the
+calling coaching AI is instructed (via the tool description and
+`_COACH_INSTRUCTIONS`) to suggest 3-5 of these whenever it creates a goal,
+grounded in what the user already shared. On success, returns a refreshed
+home screen UI resource reflecting the new goal.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+- **Associated UI resource**: declared via `_meta["ui"]["resourceUri"] =
+  "ui://home-view"` on the tool's registration (see "MCP resources" below)
+  — points at the home view, since this tool returns a refreshed home view
+  on success.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `title` | `string` | yes | Non-empty after stripping whitespace. |
+| `description` | `string` | no | Nullable. |
+| `todos` | `array` of `string` | no | Each entry non-empty after stripping whitespace; a blank/whitespace-only entry rejects the whole call before any database write. Omitted or an empty list behaves identically to never passing `todos` at all — no todos are persisted and the goal insert is unchanged from before this argument existed. |
+
+#### Output
+
+Same `dict` shape `get_home_view` returns — the home view's data, refreshed
+to include the new goal — produced via the same
+`_fetch_home_view_data`/`home_view_data_to_dict` helpers `get_home_view`
+itself uses.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `title` is missing, empty, or whitespace-only, or any entry in `todos` is blank/whitespace-only | Validation error raised before any database call — no goal and no todos are persisted. |
+| The post-create home-view refresh itself fails | Handled internally — returns `{"greetingName": null, "goals": [], "error": "We couldn't load your home screen right now."}` rather than raising, even though the goal (and any todos) already committed. |
+
+---
+
+### Tool: `create_todo`
+
+Adds a todo (subgoal step) to one of the caller's own goals. Appended to
+the end of the goal's existing todo list.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `goal_id` | `string` (UUID) | yes | Must be a valid UUID; must reference a goal owned by the caller. |
+| `text` | `string` | yes | Non-empty after stripping whitespace. |
+
+#### Output
+
+```json
+{
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "goal_id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+  "text": "Buy running shoes",
+  "done": false,
+  "sort_order": 0,
+  "created_at": "2026-06-25T09:00:00.000000+00:00",
+  "updated_at": "2026-06-25T09:00:00.000000+00:00"
+}
+```
+
+`sort_order` is computed server-side as one greater than the goal's current
+maximum (`0` for the goal's first todo) — there is no way for the caller to
+set it directly.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `goal_id` is not a valid UUID, or `text` is missing/blank | Validation error raised before any database call. |
+| `goal_id` does not exist, is not owned by the caller, or is soft-deleted | The RLS `WITH CHECK` on `todos_insert_own` causes the `INSERT` to return no row; the tool raises an error rather than silently succeeding. |
+
+---
+
+### Tool: `update_todo`
+
+Updates the text of one of the caller's existing todos. Not for marking
+completion — use `toggle_todo` for that.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `todo_id` | `string` (UUID) | yes | Must be a valid UUID. |
+| `text` | `string` | yes | Non-empty after stripping whitespace. |
+
+#### Output — found
+
+```json
+{
+  "found": true,
+  "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "goal_id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+  "text": "Buy trail running shoes",
+  "done": false,
+  "sort_order": 0,
+  "created_at": "2026-06-25T09:00:00.000000+00:00",
+  "updated_at": "2026-06-25T09:05:00.000000+00:00"
+}
+```
+
+#### Output — not found
+
+```json
+{
+  "found": false,
+  "error": "todo not found or not owned by the caller"
+}
+```
+
+Unlike every other todo tool, a missing/not-owned todo is reported as a
+value (`found: false`), not raised as an error — editing a todo that
+doesn't exist is treated as an expected conversational outcome.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `todo_id` is not a valid UUID, or `text` is missing/blank | Validation error raised before any database call. |
+| `todo_id` does not exist or is not owned by the caller | Returns `{"found": false, ...}` — see "Output — not found" above. Not an `isError: true` result. |
+
+---
+
+### Tool: `toggle_todo`
+
+Flips the completion state of one of the caller's todos (incomplete ↔
+complete). The only todo mutation called directly from the rendered
+goal-detail checklist's checkbox, via `window.callTool("toggle_todo", ...)`
+— see `get_goal_detail_view`'s entry above for the surrounding view.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `todo_id` | `string` (UUID) | yes | Must be a valid UUID. |
+
+#### Output
+
+Same `TodoResponse` shape as `create_todo`'s output, with `done` flipped
+from its prior value.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `todo_id` is not a valid UUID | Validation error raised before any database call. |
+| `todo_id` does not exist or is not owned by the caller | The RLS-scoped `UPDATE` returns no row; the tool raises an error rather than silently succeeding. |
+
+---
+
+### Tool: `delete_todo`
+
+Permanently removes one of the caller's todos — a real SQL `DELETE`, never
+a soft delete (todos have no `deleted_at` column, unlike `goals`).
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `todo_id` | `string` (UUID) | yes | Must be a valid UUID. |
+
+#### Output
+
+```json
+{
+  "deleted": true,
+  "todo_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+}
+```
+
+`deleted: false` (never raised) is returned when the todo doesn't exist or
+isn't owned by the caller — a no-op, not an error.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `todo_id` is not a valid UUID | Validation error raised before any database call. |
+| `todo_id` does not exist or is not owned by the caller | Returns `{"deleted": false, ...}` — see "Output" above. Not an `isError: true` result. |
+
+---
+
+### Tool: `list_todos`
+
+Lists all todos for one of the caller's own goals, ordered to match the
+order shown in the UI.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `goal_id` | `string` (UUID) | yes | Must be a valid UUID. |
+
+#### Output
+
+```json
+{
+  "todos": [
+    {
+      "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "goal_id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+      "text": "Buy running shoes",
+      "done": false,
+      "sort_order": 0,
+      "created_at": "2026-06-25T09:00:00.000000+00:00",
+      "updated_at": "2026-06-25T09:00:00.000000+00:00"
+    }
+  ]
+}
+```
+
+Ordered by `sort_order` ascending. An empty list (`{"todos": []}`) is
+returned, not an error, when the goal has no todos.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `goal_id` is not a valid UUID | Validation error raised before any database call. |
+| `goal_id` does not exist, isn't owned by the caller, or has no todos | Returns `{"todos": []}` — not an error. Cross-user/cross-goal isolation is enforced entirely by the `todos_select_own` RLS policy, not by an application-level filter. |
+
+---
+
+### Tool: `reorder_todos`
+
+Rewrites the display order of all of one goal's todos to match a given
+order. `todo_ids` must list every todo id for the goal, in the desired new
+order — this is a full-list rewrite (`sort_order` reassigned `0..n-1`), not
+a partial move.
+
+- **Auth required**: yes (`Authorization` bearer JWT, verified before any
+  tool logic runs).
+- **Rate limited**: yes, same per-IP threshold as REST endpoints.
+
+#### Input schema
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `goal_id` | `string` (UUID) | yes | Must be a valid UUID. |
+| `todo_ids` | `array` of `string` (UUID) | yes | Each entry must be a valid UUID. |
+
+#### Output
+
+```json
+{
+  "goal_id": "a1b2c3d4-58cc-4372-a567-0e02b2c3d479",
+  "todo_ids": [
+    "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "b2c3d4e5-58cc-4372-a567-0e02b2c3d479"
+  ]
+}
+```
+
+The returned `todo_ids` echoes the input order — a subsequent `list_todos`
+call reflects this same order.
+
+#### Error cases
+
+| Condition | Behavior |
+|---|---|
+| Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
+| Per-IP rate limit exceeded | Rejected before any database call. |
+| `goal_id` is not a valid UUID, or any entry in `todo_ids` is not a valid UUID | Validation error raised before any database call. |
+| A `todo_id` in the list does not exist, is not owned by the caller, or belongs to a different goal | That entry's `UPDATE ... WHERE id = %s AND goal_id = %s` silently affects zero rows (no exception raised) — the tool does not verify row counts per id, so a mismatched id is dropped from the effective reorder rather than rejecting the whole call. |
 
 ---
 

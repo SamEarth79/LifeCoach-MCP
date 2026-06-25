@@ -28,6 +28,24 @@ All notable changes to this project are documented in this file, following
 
 ### Added
 
+- Goal todos (LFC-007): a per-goal checklist of concrete subgoal steps. The
+  coaching AI now suggests 3-5 todos in the same `create_goal` call that
+  creates a goal, and can add, edit, complete, remove, or reorder todos
+  conversationally afterward. The goal-detail view shows the checklist with
+  tappable checkboxes — the one interactive control in an otherwise
+  read-only MCP-UI surface. `todos` table with Row Level Security scoped to
+  the owning goal, same isolation model as `updates`.
+- `create_todo`, `update_todo`, `delete_todo`, `list_todos`, `reorder_todos`
+  MCP tools — full CRUD plus reordering for a goal's todos, conversational
+  only (never wired to a UI control).
+- `toggle_todo` MCP tool — flips a todo's completion state; the only todo
+  mutation callable directly from the rendered goal-detail checklist.
+- `create_goal` MCP tool now accepts an optional `todos` list, persisting
+  one todo per entry (in order) in the same call/transaction that creates
+  the goal. Omitting `todos` behaves exactly as before.
+- `get_goal_detail_view` MCP tool's response now includes a `todos` field
+  (ordered checklist items), rendered as a checklist section that's omitted
+  entirely when a goal has no todos.
 - OAuth consent login page (LFC-005): a new unauthenticated page,
   `GET /oauth/consent`, that Supabase's OAuth 2.1 Server redirects a
   browser to so a user can log in and approve or deny an external OAuth
