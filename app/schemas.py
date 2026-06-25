@@ -75,6 +75,46 @@ class UpdateListItem(BaseModel):
     created_at: str
 
 
+class TodoCreate(BaseModel):
+    goal_id: UUID
+    text: str = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text must not be empty or whitespace-only")
+        return stripped
+
+
+class TodoUpdate(BaseModel):
+    text: str = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text must not be empty or whitespace-only")
+        return stripped
+
+
+class TodoResponse(BaseModel):
+    id: str
+    goal_id: str
+    text: str
+    done: bool
+    sort_order: int
+    created_at: str
+    updated_at: str
+
+
+class TodoReorder(BaseModel):
+    goal_id: UUID
+    todo_ids: list[UUID]
+
+
 class GoalProgressUpdate(BaseModel):
     goal_id: UUID
     percentage: int = Field(ge=0, le=100)

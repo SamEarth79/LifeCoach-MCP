@@ -60,3 +60,71 @@ cross-user isolation (AC5) remain unverified. This should be re-run against
 a real Supabase/Postgres instance before being considered production-ready,
 consistent with the same caveat already on record for every other migration
 story in this repo.
+
+## LFC-STORY-007-002
+
+Tested the six new MCP tools (`create_todo`, `update_todo`, `toggle_todo`,
+`delete_todo`, `list_todos`, `reorder_todos`) added to `app/mcp_server.py`,
+plus the four new Pydantic schemas (`TodoCreate`, `TodoUpdate`,
+`TodoResponse`, `TodoReorder`) added to `app/schemas.py`, by writing
+`tests/unit/test_todo_tools.py` — 33 new tests following exactly the same
+mocking approach already established in `tests/unit/test_mcp_server.py`
+for `record_update`/`set_goal_progress`/`delete_goal`/`list_updates`: each
+tool is called directly as a plain async function with a fake `ctx`
+(`SimpleNamespace` wrapping `request_context.request.headers`), and
+`verify_bearer_token`, `enforce_mcp_rate_limit`, and `get_rls_connection`
+are all monkeypatched with fake async-context-manager connections/cursors,
+so no real Postgres/Supabase instance is needed. No new test framework or
+mocking pattern was introduced — `reorder_todos`, which issues one `UPDATE`
+per todo_id rather than a single statement, needed one new small fixture
+(`_SequentialCursor`/`_SequentialConnection`) that returns a different
+`fetchone()` result per call, built the same way the existing
+`_DeleteThenRefreshCursor` in `test_mcp_server.py` handles `delete_goal`'s
+own two-phase query pattern.
+
+Every acceptance criterion maps to at least one test: AC1's
+first-todo-for-a-goal-gets-0 sort_order behavior is verified by asserting
+the actual executed SQL contains
+`COALESCE((SELECT MAX(sort_order) + 1 FROM todos WHERE goal_id = %s), 0)`,
+not just by asserting a returned value; AC2's "no effect and a clear
+not-found result" requirement for `update_todo` is verified by asserting
+the tool returns `{"found": False, ...}` rather than raising when no row
+comes back; AC3 covers both directions of the `toggle_todo` flip; AC4
+verifies `delete_todo` issues a real `DELETE FROM todos` (never soft) and
+returns `deleted: False` as a no-op when nothing matched; AC5 verifies
+`list_todos`'s `ORDER BY sort_order ASC` both in the executed query text
+and the returned order; AC6 verifies `reorder_todos` issues one `UPDATE
+... SET sort_order = %s WHERE id = %s AND goal_id = %s` per todo_id with
+the correct position before a single commit, plus a dedicated test that
+calls `reorder_todos` then `list_todos` end-to-end (against two separate
+fake connections, the second pre-seeded with rows already in the new
+order) to directly exercise the AC's "a subsequent list_todos call
+reflects the new order" wording; AC8 exercises `TodoCreate`/`TodoUpdate`
+directly, confirming both follow the existing
+`reject_blank_title`/`reject_blank_content` whitespace-stripping/
+blank-rejection validator pattern verbatim.
+
+AC7 (every tool rejecting another user's `goal_id`/`todo_id` via RLS) is
+verified only at the app-behavior level — each tool's "no row comes back"
+path (the RLS-insert-check test for `create_todo`, the found-false test
+for `update_todo`, the raises-when-no-row test for `toggle_todo`, the
+no-op test for `delete_todo`) is exercised and confirmed to fail closed
+with no partial write. This cannot prove Postgres RLS itself is what
+excludes the row without a live database session under `auth.uid()` — the
+same recurring caveat already on record for every other RLS-dependent
+story in this repo (LFC-STORY-007-001, LFC-002-goals's RLS stories).
+Flagged explicitly in `test-results.md` rather than silently assumed
+verified.
+
+This is a backend/MCP-tool-only story with no new UI (the todo UI lands in
+LFC-STORY-007-004), so per `rules/testing.md` and the same precedent
+already on record for LFC-002-goals's `create_goal`/`delete_goal` stories
+and LFC-003-updates's `record_update`/`list_updates` stories, no E2E
+(Playwright) tests were required or written. Ran the full existing suite
+(`.venv/bin/python -m pytest -q`): **348 passed, 0 failed** (315
+pre-existing + 33 new), no regressions introduced.
+
+Verdict: **PASS**. AC1–AC6 and AC8 are fully verified against mocked
+DB/auth/rate-limit boundaries; AC7's underlying RLS enforcement remains an
+unverified-against-a-live-database caveat, consistent with the rest of
+this feature and repo.
