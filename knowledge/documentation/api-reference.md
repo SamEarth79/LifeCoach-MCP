@@ -965,7 +965,7 @@ call reflects this same order.
 | Missing, malformed, expired, or invalid-signature JWT | Rejected before any tool logic or database call; returned as an MCP `isError: true` result. |
 | Per-IP rate limit exceeded | Rejected before any database call. |
 | `goal_id` is not a valid UUID, or any entry in `todo_ids` is not a valid UUID | Validation error raised before any database call. |
-| A `todo_id` in the list does not exist, is not owned by the caller, or belongs to a different goal | That entry's `UPDATE ... WHERE id = %s AND goal_id = %s` silently affects zero rows (no exception raised) — the tool does not verify row counts per id, so a mismatched id is dropped from the effective reorder rather than rejecting the whole call. |
+| A `todo_id` in the list does not exist, is not owned by the caller, or belongs to a different goal | That entry's `UPDATE ... WHERE id = %s AND goal_id = %s` affects zero rows; the tool checks `cursor.rowcount` after each statement and raises `ValueError` on the first mismatch, leaving the transaction uncommitted (no partial reorder is ever persisted). |
 
 ---
 

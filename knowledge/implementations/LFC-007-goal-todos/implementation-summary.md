@@ -290,3 +290,28 @@ test each. No new RLS/live-database caveat beyond what's already on record
 for this feature; no Playwright/E2E gap, since this repo's own
 already-established MCP-UI precedent determines it doesn't apply to this
 surface.
+
+## Post-review fix: reorder_todos no longer silently drops mismatched ids
+
+PR review (#22) flagged that `reorder_todos`' per-`todo_id` `UPDATE` loop
+never checked affected-row counts: a `todo_id` that didn't exist or
+belonged to a different goal was silently dropped (zero rows updated, no
+error), while the tool still reported success with the caller's full input
+list — risking duplicate/inconsistent `sort_order` values with nothing
+catching it.
+
+Fixed by checking `cursor.rowcount` after each `UPDATE` and raising
+`ValueError` on the first mismatch, before `conn.commit()` is ever reached
+— consistent with how `create_todo`/`toggle_todo` already raise rather than
+silently no-op. Added
+`test_reorder_todos_raises_and_does_not_commit_when_a_todo_id_does_not_match`
+to `tests/unit/test_todo_tools.py`, asserting the call raises, the
+connection is never committed, and execution stops at the first mismatch
+(no UPDATE issued for ids after the failing one). `_SequentialCursor`'s
+test double gained an optional `rowcounts` parameter to simulate a
+zero-row UPDATE.
+
+Ran `.venv/bin/python -m pytest -q`: **374 passed, 0 failed** (373 + 1
+new), no regressions. `knowledge/documentation/api-reference.md`'s
+`reorder_todos` error-case table updated to describe the new raise-and-
+roll-back behavior instead of the old silent-drop behavior.

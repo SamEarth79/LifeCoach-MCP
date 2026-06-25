@@ -502,6 +502,10 @@ async def reorder_todos(goal_id: str, todo_ids: list[str], ctx: Context) -> dict
                     """,
                     (position, str(todo_id), str(reorder.goal_id)),
                 )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        f"todo {todo_id} does not exist or does not belong to goal_id"
+                    )
         await conn.commit()
 
     return {"goal_id": str(reorder.goal_id), "todo_ids": [str(tid) for tid in reorder.todo_ids]}

@@ -36,6 +36,7 @@ class _FakeCursor:
         self._row = row
         self._rows = rows
         self.executed = []
+        self.rowcount = 1
 
     async def execute(self, query, params=None):
         self.executed.append((query, params))
@@ -69,14 +70,22 @@ class _SequentialCursor:
     """Returns a different `fetchone()` row on each call, in order — used
     for `reorder_todos`, which issues one `UPDATE ... WHERE id = %s` per
     todo_id rather than a single statement.
+
+    `rowcounts`, when given, supplies the `cursor.rowcount` to expose after
+    each `execute()` call, in order (one per UPDATE) — used to simulate a
+    todo_id that doesn't exist/belong to the goal (rowcount 0).
     """
 
-    def __init__(self, rows):
+    def __init__(self, rows, rowcounts=None):
         self._rows = list(rows)
+        self._rowcounts = list(rowcounts) if rowcounts is not None else None
         self.executed = []
+        self.rowcount = 1
 
     async def execute(self, query, params=None):
         self.executed.append((query, params))
+        if self._rowcounts is not None:
+            self.rowcount = self._rowcounts.pop(0) if self._rowcounts else 1
 
     async def fetchone(self):
         return self._rows.pop(0) if self._rows else None
@@ -89,8 +98,8 @@ class _SequentialCursor:
 
 
 class _SequentialConnection:
-    def __init__(self, rows):
-        self.cursor_instance = _SequentialCursor(rows)
+    def __init__(self, rows, rowcounts=None):
+        self.cursor_instance = _SequentialCursor(rows, rowcounts=rowcounts)
         self.committed = False
 
     def cursor(self):
@@ -119,8 +128,8 @@ def _patch_db(monkeypatch, row=None, rows=None):
     return fake_connection, captured
 
 
-def _patch_sequential_db(monkeypatch, rows):
-    fake_connection = _SequentialConnection(rows)
+def _patch_sequential_db(monkeypatch, rows, rowcounts=None):
+    fake_connection = _SequentialConnection(rows, rowcounts=rowcounts)
     captured = {}
 
     @asynccontextmanager
@@ -578,6 +587,27 @@ async def test_reorder_todos_subsequent_list_todos_reflects_the_new_order(monkey
     listed = await mcp_server.list_todos(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
 
     assert [todo["id"] for todo in listed["todos"]] == [TODO_ID_2, TODO_ID]
+
+
+@pytest.mark.asyncio
+async def test_reorder_todos_raises_and_does_not_commit_when_a_todo_id_does_not_match(monkeypatch):
+    # The second UPDATE affects zero rows (todo_id not found / belongs to a
+    # different goal) — reorder_todos must raise rather than silently
+    # reporting success with a partially-applied reorder.
+    fake_connection, _ = _patch_sequential_db(monkeypatch, rows=[None, None, None], rowcounts=[1, 0, 1])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.reorder_todos(
+            goal_id=GOAL_ID,
+            todo_ids=[TODO_ID, TODO_ID_2, TODO_ID_3],
+            ctx=_fake_context("Bearer faketoken"),
+        )
+
+    assert fake_connection.committed is False
+    # Stops at the first mismatch — the third id's UPDATE is never issued.
+    assert len(fake_connection.cursor_instance.executed) == 2
 
 
 @pytest.mark.asyncio
