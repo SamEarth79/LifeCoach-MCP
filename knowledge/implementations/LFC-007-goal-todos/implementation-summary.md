@@ -128,3 +128,64 @@ Verdict: **PASS**. AC1–AC6 and AC8 are fully verified against mocked
 DB/auth/rate-limit boundaries; AC7's underlying RLS enforcement remains an
 unverified-against-a-live-database caveat, consistent with the rest of
 this feature and repo.
+
+## LFC-STORY-007-003
+
+Tested the backend agent's change adding an optional `todos: list[str] |
+None` argument to `create_goal` (`app/mcp_server.py`) and a matching
+`todos` field with a `reject_blank_todos` validator to `GoalCreate`
+(`app/schemas.py`), plus the accompanying prose updates to
+`_COACH_INSTRUCTIONS` and `create_goal`'s tool `description=` instructing
+the LLM to suggest 3-5 subgoal-style todos at goal creation and to use the
+existing todo CRUD tools conversationally. Added 10 new tests to
+`tests/unit/test_mcp_server.py`, following the file's existing
+`_patch_db_sequenced`/`_fake_context`/`_patch_auth`/`_patch_rate_limit`
+mocking pattern exactly — no new test fixture or mocking approach was
+introduced.
+
+First confirmed backward compatibility (AC3) by running the pre-existing
+`create_goal` tests unchanged — they still pass with no modification,
+since every existing caller invokes `create_goal` without `todos` and the
+code path for that case (`else: await cursor.execute(...)` with the
+original, unmodified single-INSERT query) is untouched.
+
+Then added tests for the new behavior:
+`test_create_goal_with_todos_persists_each_todo_in_order_with_zero_indexed_sort_order`
+asserts, against the fake cursor's captured executed statements, that a
+3-item `todos` list produces a goal INSERT with `RETURNING id` followed by
+exactly 3 `INSERT INTO todos` statements with `sort_order` 0, 1, 2 matching
+list position and order — covering AC1, AC2's persistence half, and AC6's
+"results in that many todo rows persisted ... correctly ordered" wording
+in one test.
+`test_create_goal_rejects_blank_todo_in_list_before_db_call` and the
+schema-level `test_goal_create_rejects_blank_todo_in_list` both confirm a
+blank/whitespace-only entry in the `todos` list raises `ValueError`/
+`ValidationError` before any DB call, mirroring the existing
+`reject_blank_title`/`TodoCreate.text` precedent.
+`test_create_goal_with_omitted_todos_runs_the_same_single_insert_as_before_this_story`
+and `test_create_goal_with_empty_todos_list_runs_the_same_single_insert_as_omitted`
+both assert the first executed query has no `RETURNING` and that no
+`INSERT INTO todos` statement appears anywhere in the executed list,
+directly proving AC3 for both the omitted and the explicitly-empty-list
+case (`if goal.todos:` is falsy for both).
+Three further tests
+(`test_server_instructions_tell_claude_to_suggest_todos_on_goal_creation`,
+`test_server_instructions_tell_claude_to_use_todo_crud_tools_conversationally`,
+`test_create_goal_tool_description_instructs_suggesting_todos_at_creation`)
+confirm the AC4/AC5 prose changes landed in both
+`_COACH_INSTRUCTIONS` and the tool description.
+
+This story changes no UI (the todo checklist's rendering is
+LFC-STORY-007-004's scope), and `create_goal` itself has never carried E2E
+coverage per this repo's existing backend-only-story precedent
+(LFC-002-goals, LFC-STORY-007-002 above) — so per `rules/testing.md` no
+E2E (Playwright) tests were required or written.
+
+Ran the full existing suite (`.venv/bin/python -m pytest -q`): **358
+passed, 0 failed** (348 pre-existing + 10 new), no regressions.
+
+Verdict: **PASS**. AC1 through AC6 are all directly covered by the new
+tests. The new todo INSERTs run inside the same `get_rls_connection`-scoped
+transaction as the pre-existing goal INSERT, so no new RLS/live-database
+caveat is introduced beyond the one already on record for this feature
+(LFC-STORY-007-001, LFC-STORY-007-002).

@@ -276,3 +276,98 @@ only at the app-behavior level (no row back → no-op/not-found/raise) — the
 underlying RLS enforcement itself remains an unverified-against-a-live-
 database caveat, consistent with every other RLS-dependent story in this
 repo (LFC-STORY-007-001, LFC-002-goals's RLS stories).
+
+## LFC-STORY-007-003
+
+**Verdict: PASS**
+
+### Layers required
+
+- Unit/feature: required and written. `GoalCreate` gained a new `todos:
+  list[str] | None` field with a `reject_blank_todos` validator, and
+  `create_goal` gained a new `todos` parameter that — when non-empty —
+  inserts the goal with `RETURNING id` then one `todos` row per list item
+  with 0-indexed `sort_order`, and — when omitted/empty — runs the exact
+  unchanged original single-INSERT query. Both are new business logic
+  requiring tests. Followed the exact mocking approach already established
+  in `tests/unit/test_mcp_server.py` (`_patch_db_sequenced`/`_fake_context`/
+  `_patch_auth`/`_patch_rate_limit`) — no new mocking pattern introduced.
+- E2E (Playwright): **not required**. This story changes no UI — the todo
+  checklist's rendering in the goal-detail view is LFC-STORY-007-004's
+  scope, not this one. `create_goal` itself already has no E2E coverage
+  (per LFC-002-goals's precedent, carried forward in this feature's
+  LFC-STORY-007-002 entry above), and this story only adds an optional
+  parameter to that same backend-only tool plus prose-only changes to
+  `_COACH_INSTRUCTIONS`/tool descriptions. Same carve-out as every other
+  backend-only story in this repo.
+
+### Pre-existing test confirmation (AC3 backward compatibility)
+
+Ran the pre-existing `create_goal` tests in `tests/unit/test_mcp_server.py`
+unchanged (`test_create_goal_inserts_row_with_verified_user_id_title_and_description`,
+`test_create_goal_rejects_blank_title_before_db_call`,
+`test_create_goal_allows_omitted_description`, and others) — all still pass
+without modification, confirming that calling `create_goal` without a
+`todos` argument (the only way every pre-existing caller invokes it) is
+unaffected by this story's change.
+
+### Unit/feature tests — `tests/unit/test_mcp_server.py` (10 new)
+
+- **AC1/AC2/AC6** (todos persisted, in order, 0-indexed `sort_order`):
+  `test_create_goal_with_todos_persists_each_todo_in_order_with_zero_indexed_sort_order`
+  calls `create_goal` with a 3-item `todos` list and asserts, against the
+  fake cursor's captured `executed` list, that the goal INSERT uses
+  `RETURNING id`, and that exactly 3 subsequent `INSERT INTO todos`
+  statements follow, each with params `(user_id, goal_id, text, sort_order)`
+  where `sort_order` is 0, 1, 2 matching list position and `text` matches
+  list order. This single test satisfies AC1, AC2 (the persistence half),
+  and AC6 (the story's own "results in that many todo rows persisted ...
+  correctly ordered" feature-test wording) at once.
+- **AC2 (blank-todo rejection)**:
+  `test_create_goal_rejects_blank_todo_in_list_before_db_call` calls
+  `create_goal` with `todos=["Buy running shoes", "   "]` and asserts a
+  `ValueError` is raised with zero queries executed — the validator runs
+  inside `GoalCreate(...)` before the `async with get_rls_connection(...)`
+  block is ever entered.
+  `test_goal_create_rejects_blank_todo_in_list` exercises the same
+  rejection directly at the Pydantic schema layer (`GoalCreate(...)` raises
+  `ValidationError`), and
+  `test_goal_create_strips_surrounding_whitespace_from_each_todo` confirms
+  each surviving todo string is stripped, matching the
+  `reject_blank_title`/`TodoCreate.text` precedent verbatim.
+  `test_goal_create_allows_omitted_or_none_todos` confirms `todos` defaults
+  to `None` and accepts an explicit `None`.
+- **AC3 (no behavior change when omitted/empty)**:
+  `test_create_goal_with_omitted_todos_runs_the_same_single_insert_as_before_this_story`
+  mirrors the pre-existing `test_create_goal_inserts_row_with_verified_user_id_title_and_description`
+  call exactly (no `todos` argument at all) and asserts the first executed
+  query has no `RETURNING` and no `INSERT INTO todos` statement appears
+  anywhere in the executed list.
+  `test_create_goal_with_empty_todos_list_runs_the_same_single_insert_as_omitted`
+  covers the same assertion for an explicitly passed `todos=[]`, since
+  `if goal.todos:` is falsy for an empty list too — both omitted and empty
+  collapse to the exact original query shape.
+- **AC4/AC5 (instruction/description prose)**:
+  `test_server_instructions_tell_claude_to_suggest_todos_on_goal_creation`
+  asserts `_COACH_INSTRUCTIONS` mentions "3-5", "todo", and references goal
+  creation; `test_server_instructions_tell_claude_to_use_todo_crud_tools_conversationally`
+  asserts all five todo CRUD tool names
+  (`create_todo`/`update_todo`/`toggle_todo`/`delete_todo`/`reorder_todos`)
+  appear in the instructions;
+  `test_create_goal_tool_description_instructs_suggesting_todos_at_creation`
+  asserts the `create_goal` tool's own `description=` also carries the
+  "3-5"/"todo" suggestion language.
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root: **358 passed, 0
+failed** (348 pre-existing + 10 new from this story). No regressions.
+
+### Totals: 10 new automated tests, all passing; 358/358 full suite
+passing, 0 failed. AC1, AC2, AC3, AC4, AC5, and AC6 are all directly
+covered. No new RLS/live-database caveat is introduced by this story — the
+todo INSERT statements run inside the same `get_rls_connection`-scoped
+transaction as the existing goal INSERT, so they inherit the same
+already-flagged unverified-against-a-live-database caveat as every prior
+RLS-dependent story in this repo (LFC-STORY-007-001, LFC-STORY-007-002),
+not a new one specific to this story.

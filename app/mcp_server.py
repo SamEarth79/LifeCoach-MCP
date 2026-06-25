@@ -52,7 +52,17 @@ _COACH_INSTRUCTIONS = (
     "blank progress ring is worse than an imperfect estimate. Don't "
     "show a UI view (get_home_view/get_goal_detail_view) just to "
     "narrate progress mid-conversation — show it when the user is "
-    "navigating between goals, not as a substitute for talking."
+    "navigating between goals, not as a substitute for talking. "
+    "Whenever you create a goal, suggest 3-5 concrete, subgoal-style "
+    "todos for it in the same create_goal call, so the user starts with "
+    "a checklist of next steps instead of a blank goal — ground them in "
+    "whatever the user already told you, not generic filler. Once a "
+    "goal has todos, treat them as a living checklist: whenever the "
+    "user conversationally asks to add, change, complete, remove, or "
+    "reorder a todo for an existing goal, use create_todo, update_todo, "
+    "toggle_todo, delete_todo, or reorder_todos to keep it in sync — "
+    "don't just acknowledge the request in conversation without "
+    "actually updating the checklist."
 )
 
 mcp = FastMCP(
@@ -717,12 +727,17 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
         "have actually agreed on a clear title for what they want to work "
         "on — not before they've described it. Optionally include a short "
         "`description` capturing what they want to achieve, their "
-        "timeline, or why it matters, if they shared that. On success, "
-        "returns a refreshed home screen UI resource reflecting the new "
-        "goal."
+        "timeline, or why it matters, if they shared that. Also suggest 3-5 "
+        "concrete, subgoal-style first steps in `todos` so the user starts "
+        "with a checklist instead of a blank goal — base them on whatever "
+        "the user has already shared, and keep each one short and "
+        "actionable. On success, returns a refreshed home screen UI "
+        "resource reflecting the new goal."
     )
 )
-async def create_goal(title: str, ctx: Context, description: str | None = None) -> dict:
+async def create_goal(
+    title: str, ctx: Context, description: str | None = None, todos: list[str] | None = None
+) -> dict:
     request = ctx.request_context.request
     await enforce_mcp_rate_limit(request)
 
@@ -730,20 +745,39 @@ async def create_goal(title: str, ctx: Context, description: str | None = None) 
     current_user = await verify_bearer_token(authorization_header)
 
     try:
-        goal = GoalCreate(title=title, description=description)
+        goal = GoalCreate(title=title, description=description, todos=todos)
     except ValidationError as exc:
         logger.warning("create_goal validation failed: %s", exc)
         raise ValueError(str(exc)) from exc
 
     async with get_rls_connection(current_user.id) as conn:
         async with conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO goals (user_id, title, description)
-                VALUES (%s, %s, %s)
-                """,
-                (current_user.id, goal.title, goal.description),
-            )
+            if goal.todos:
+                await cursor.execute(
+                    """
+                    INSERT INTO goals (user_id, title, description)
+                    VALUES (%s, %s, %s)
+                    RETURNING id
+                    """,
+                    (current_user.id, goal.title, goal.description),
+                )
+                (new_goal_id,) = await cursor.fetchone()
+                for sort_order, todo_text in enumerate(goal.todos):
+                    await cursor.execute(
+                        """
+                        INSERT INTO todos (user_id, goal_id, text, sort_order)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (current_user.id, str(new_goal_id), todo_text, sort_order),
+                    )
+            else:
+                await cursor.execute(
+                    """
+                    INSERT INTO goals (user_id, title, description)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (current_user.id, goal.title, goal.description),
+                )
         await conn.commit()
 
     try:
