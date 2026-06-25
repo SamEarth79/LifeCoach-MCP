@@ -710,7 +710,9 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
 ):
     goal_row = (GOAL_ID, "Run a 5k", "Train three times a week", 42)
     update_rows = [("Ran 3 miles today", CREATED_AT)]
-    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, update_rows])
+    todo_id = "44444444-4444-4444-4444-444444444444"
+    todo_rows = [(todo_id, "Buy running shoes", False, 0)]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, update_rows, todo_rows])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -721,6 +723,9 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
     assert result["description"] == "Train three times a week"
     assert result["progressPercent"] == 42
     assert result["recentUpdates"][0]["content"] == "Ran 3 miles today"
+    assert result["todos"][0]["text"] == "Buy running shoes"
+    assert result["todos"][0]["done"] is False
+    assert result["todos"][0]["sortOrder"] == 0
     assert "transcript" not in str(result).lower()
     assert captured["user_id"] == USER_ID
 
@@ -729,7 +734,7 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
 async def test_get_goal_detail_view_query_selects_only_content_and_created_at_for_updates(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
     update_rows = []
-    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, update_rows])
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, update_rows, []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -743,9 +748,25 @@ async def test_get_goal_detail_view_query_selects_only_content_and_created_at_fo
 
 
 @pytest.mark.asyncio
+async def test_get_goal_detail_view_query_selects_todos_ordered_by_sort_order(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, [], []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    todos_query, todos_params = fake_connection.cursor_instance.executed[2]
+    assert "SELECT id, text, done, sort_order" in todos_query
+    assert "FROM todos" in todos_query
+    assert "ORDER BY sort_order ASC" in todos_query
+    assert todos_params == (GOAL_ID,)
+
+
+@pytest.mark.asyncio
 async def test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_empty(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -755,9 +776,21 @@ async def test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_e
 
 
 @pytest.mark.asyncio
+async def test_get_goal_detail_view_renders_empty_todos_list_when_goal_has_no_todos(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert result["todos"] == []
+
+
+@pytest.mark.asyncio
 async def test_get_goal_detail_view_renders_no_estimate_yet_when_progress_percent_is_null(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -830,7 +863,7 @@ async def test_get_goal_detail_view_rejects_malformed_goal_id_before_db_call(mon
 @pytest.mark.asyncio
 async def test_get_goal_detail_view_enforces_rate_limit_before_jwt_verification(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     call_order = []
 
     async def _record_rate_limit(*_args, **_kwargs):
@@ -881,7 +914,7 @@ async def test_get_goal_detail_view_jwt_verification_before_uuid_validation_only
 @pytest.mark.asyncio
 async def test_get_goal_detail_view_query_has_no_app_level_user_id_clause(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, []])
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 

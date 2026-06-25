@@ -371,3 +371,239 @@ transaction as the existing goal INSERT, so they inherit the same
 already-flagged unverified-against-a-live-database caveat as every prior
 RLS-dependent story in this repo (LFC-STORY-007-001, LFC-STORY-007-002),
 not a new one specific to this story.
+
+## LFC-STORY-007-004
+
+**Verdict: PASS**
+
+### Implementation verified against the backend agent's report (not trusted at face value)
+
+Read `app/ui_templates.py` and `app/mcp_server.py::get_goal_detail_view` in
+full before writing any test. Confirmed:
+
+- `GoalDetailTodo` (`id`, `text`, `done`, `sort_order`) and the `todos:
+  list[GoalDetailTodo]` field on `GoalDetailViewData` exist exactly as the
+  story specifies; `goal_detail_data_to_dict` maps each one to `{"id",
+  "text", "done", "sortOrder"}` — confirmed camelCase mapping, including
+  for an empty list and for the error-short-circuit path (`todos` absent
+  from the dict entirely when `error` is set, same discipline as every
+  other field).
+- `get_goal_detail_view` issues a second query, `SELECT id, text, done,
+  sort_order FROM todos WHERE goal_id = %s ORDER BY sort_order ASC`, only
+  after the goal-row query succeeds, and populates `GoalDetailViewData.todos`
+  from it — confirmed by reading the query string directly, matching AC1
+  verbatim (including the `ORDER BY sort_order ASC` clause).
+- `renderGoalDetailView`'s embedded JS gates the entire checklist section
+  (`<p class="section-label">Checklist</p>` + `<div class="todo-list">`)
+  behind `data.todos && data.todos.length > 0`, so a goal with zero todos
+  renders no checklist markup at all rather than an empty wrapper (AC7).
+  Items are built via a plain ascending `for` loop over `data.todos`,
+  rendering whatever order the array already arrives in — i.e. exactly the
+  server's `sort_order ASC` order, with no client-side re-sort (AC3).
+- `todoItem(t)` renders an `<input type="checkbox" class="todo-checkbox">`
+  plus a `<span class="todo-text">`, escaping `t.id` and `t.text` via the
+  existing `escapeHtml`, applying the `checked` attribute and `todo-done`
+  class only when `t.done` is true.
+- The checkbox's `onchange` interpolates only `safeId` into the
+  `toggleTodo('<id>')` JS-string context, never `safeText` — re-verified
+  the same onclick/onchange-interpolation-discipline property this repo has
+  enforced since LFC-STORY-004 of LFC-004-mcp-ui-home-goal-views (only a
+  trusted server-generated id may land in a JS-execution-context string;
+  free text never does).
+- `toggleTodo(todoId)` disables the checkbox *before* calling
+  `window.callTool("toggle_todo", { todo_id: todoId })` (preventing a
+  double-fire from a second click while the first call is in flight), then
+  on resolution sets `checkbox.checked = d.done`, re-enables the checkbox,
+  and adds/removes the `todo-done` class on the text span to match — this
+  is the full round-trip AC4 describes.
+- Grepped the entire rendered document (both `render_goal_detail_view()`
+  and `render_home_view()`, since the home view swaps in detail markup via
+  client-side `innerHTML`) for any add/edit/reorder/delete-todo control or
+  reference to `create_todo`/`update_todo`/`delete_todo`/`reorder_todos` —
+  none present anywhere (AC5). Only `toggle_todo` is ever called from
+  rendered UI, matching the story's "those remain conversational/tool-only"
+  framing.
+- `app/mcp_server.py`'s `_tool_manager._tools[...].meta` mutations at the
+  bottom of the file do **not** include an entry for `toggle_todo` —
+  confirmed it carries no `ui` key, i.e. it is a structured-data-returning
+  tool consumed entirely client-side via `window.callTool`'s promise, never
+  a tool that triggers a host-level page re-render the way
+  `get_goal_detail_view`/`delete_goal`/`create_goal` do.
+- The iframe size-reporting mechanism (`reportSize()`/`ResizeObserver`/
+  `ui/notifications/size-changed`) lives entirely in the shared `_BRIDGE_JS`
+  block, outside `renderGoalDetailView`'s own function body — confirmed by
+  string-searching `renderGoalDetailView`'s extracted function body and
+  finding zero occurrences of `reportSize`/`ResizeObserver` inside it. The
+  todo-checklist addition could not have touched this mechanism (AC6); the
+  pre-existing `test_render_goal_detail_view_reports_size_changes_to_host`
+  test (data-independent, asserting only static JS source presence) was
+  re-run unmodified and still passes.
+
+### E2E (Playwright) question — explicit reasoning, not added
+
+The story flags this as needing Playwright per `rules/testing.md` ("any
+story changing user-facing behavior needs E2E"), and this is genuinely the
+first *interactive* element in a checklist sense. But this repo already has
+a controlling, directly-on-point precedent that overrides the generic
+rule: `knowledge/implementations/LFC-004-mcp-ui-home-goal-views/test-results.md`
+explicitly determined, across every one of its stories (LFC-STORY-003
+through -005, plus the later "Post-merge fix: MCP Apps re-architecture"
+section), that **Playwright/browser E2E does not apply to this repo's
+MCP-UI surface at all**: `render_home_view()`/`render_goal_detail_view()`
+return a static HTML document containing inline JS that is loaded and
+executed by an *external* MCP-UI host (Claude Desktop or equivalent) inside
+a sandboxed iframe via a `postMessage`/`ui/initialize` bridge — this repo
+serves the resource but owns no page/route of its own for Playwright to
+navigate to and drive. The precedent's chosen substitute — confirmed
+working there and followed identically here — is thorough unit-level
+testing against the actual JS *source* (function presence, control flow,
+string-literal interpolation discipline, CSS class presence) rather than
+executing the JS in a real browser, which the precedent file states
+explicitly: "this view is HTML rendered for an MCP-UI host, not a page or
+route of this repo's own to drive with Playwright."
+
+This is also not the first *interactive* element despite being the first
+*checklist*: `goalCard`'s onclick (home → detail navigation),
+`delete_goal`'s two-stage confirm flow, and `continueGoal`'s
+DOM-`textContent` round-trip were all interactive elements introduced in
+LFC-004 and tested this same source-level way, with zero Playwright tests
+written for any of them, and that precedent was never revisited or
+overturned by any later story in this repo (including the
+"Post-merge fix" section, which confirmed the bridge actually works against
+a real Claude Desktop client — by manual user verification, not Playwright).
+`toggleTodo`'s `window.callTool(...).then(...)` round-trip follows the
+identical pattern already established by `confirmDelete`'s and
+`goalCard`'s own `window.callTool(...).then(...)` round-trips, so the same
+substitute applies with no new justification needed beyond what's already
+on record.
+
+**Conclusion: no Playwright/E2E tests were added, consistent with this
+repo's own established precedent for MCP-UI views specifically — this is
+not a skip of the rule, it is following the more specific, already-decided
+precedent that supersedes the generic rule for this one surface.** If a
+live MCP-UI host (e.g. real Claude Desktop) becomes available for manual or
+scripted verification in the future, the toggle round-trip (checkbox click
+→ `toggle_todo` call → checked-state/strikethrough update) should be
+confirmed there, the same way LFC-004's `postMessage` bridge itself was
+eventually confirmed working against a real client after merge — this is
+recorded as an open item, not a settled fact.
+
+### Unit tests — 11 new, all passing
+
+Added to `tests/unit/test_ui_templates.py`:
+
+1. `test_render_goal_detail_view_includes_todo_item_and_toggle_functions` —
+   confirms `todoItem`/`toggleTodo` are present in the rendered document.
+2. `test_render_goal_detail_view_renders_checklist_section_when_todos_present`
+   — AC3: the `data.todos.length > 0` gate, the `Checklist` label, and the
+   `todo-list` wrapper are all present and wired to `todoItem(data.todos[t])`.
+3. `test_render_goal_detail_view_iterates_todos_in_given_order` — AC3:
+   confirms a plain ascending `for` loop with no client-side sort/reverse,
+   i.e. render order is exactly the server-provided `sort_order ASC` order.
+4. `test_render_goal_detail_view_omits_checklist_entirely_when_todos_empty`
+   — AC7: confirms the checklist label and wrapper are both gated behind
+   the single `data.todos.length > 0` check (only one `if (` in that
+   branch), so a zero-todos goal renders neither an empty wrapper nor a
+   label with nothing under it.
+5. `test_todo_item_function_renders_checkbox_and_text_reflecting_done_state`
+   — AC3: confirms the checkbox/text markup and the `t.done`-conditioned
+   `checked` attribute and `todo-done` class.
+6. `test_todo_item_onclick_interpolates_only_safe_id_never_free_text` —
+   re-verifies the onclick/onchange-interpolation-discipline property
+   (only `safeId`, never `safeText`, lands in the `onchange` JS-string
+   context) established for every other interactive element since
+   LFC-004.
+7. `test_toggle_todo_calls_calltool_with_todo_id_and_disables_checkbox_first`
+   — AC4: confirms `checkbox.disabled = true` happens before
+   `window.callTool("toggle_todo", { todo_id: todoId })` fires.
+8. `test_toggle_todo_reconciles_checked_state_and_strikethrough_from_response`
+   — AC4: confirms `checkbox.checked = d.done`, `checkbox.disabled = false`,
+   and the `todo-done` class add/remove all happen in the `.then(...)`
+   resolution callback.
+9. `test_render_goal_detail_view_has_no_add_edit_reorder_delete_todo_controls`
+   — AC5: greps the full rendered document (both views) for any
+   add/edit/reorder/delete-todo control text or reference to
+   `create_todo`/`update_todo`/`delete_todo`/`reorder_todos` — none found.
+10. `test_render_goal_detail_view_todo_section_styles_present_in_shared_stylesheet`
+    — confirms `.todo-list`/`.todo-item`/`.todo-checkbox`/`.todo-text`/
+    `.todo-done` are all present in the shared stylesheet.
+11. `test_render_goal_detail_view_size_reporting_unaffected_by_todo_section`
+    — AC6: confirms `reportSize`/`ResizeObserver` do not appear inside
+    `renderGoalDetailView`'s own function body (they live in the
+    independent, unmodified `_BRIDGE_JS` block), and that the
+    size-reporting wiring is still present in the full document.
+The pre-existing `test_render_goal_detail_view_reports_size_changes_to_host`
+and `test_render_goal_detail_view_includes_bridge_js_initialize_handshake`
+tests (data-independent, asserting only static JS source presence) were
+also re-run unmodified alongside the 11 new tests above, re-confirming AC6
+and the bridge handshake are untouched by this story.
+
+(11 new test functions total were added to `tests/unit/test_ui_templates.py`
+— see the file for the exact list; the descriptions above map each to its
+acceptance criterion.)
+
+### Pre-existing tests re-run, confirmed still accurate (not just trusted)
+
+- `tests/unit/test_ui_templates.py::test_goal_detail_data_to_dict_maps_camel_case_fields`
+  (already updated by the backend agent) — re-read and confirmed it
+  exercises a real `GoalDetailTodo` instance and asserts the exact
+  `{"id", "text", "done", "sortOrder"}` shape, not a partial/loose match.
+- `tests/unit/test_ui_templates.py::test_goal_detail_data_to_dict_maps_multiple_todos_in_sort_order`
+  and `..._empty_todos_list` (already added by the backend agent) —
+  confirmed they assert order-preservation across multiple todos and the
+  empty-list case respectively; both genuinely exercise AC2's mapping
+  contract, not just "doesn't crash."
+- `tests/unit/test_mcp_server.py::test_get_goal_detail_view_query_selects_todos_ordered_by_sort_order`
+  and `..._renders_empty_todos_list_when_goal_has_no_todos` (already added
+  by the backend agent) — confirmed the first asserts the exact executed
+  SQL text (`SELECT id, text, done, sort_order` / `FROM todos` / `ORDER BY
+  sort_order ASC` / params) rather than just a returned shape, directly
+  satisfying AC1's "ordered by sort_order" wording at the query level, and
+  the second confirms AC7's zero-todos case actually exists and passes
+  (not just claimed) — `result["todos"] == []` for a goal with no todo
+  rows.
+- `tests/feature/test_mcp_get_goal_detail_view.py`'s wire-protocol test was
+  updated by the backend agent to pass an empty `todo_rows` list through
+  the mocked DB sequence — re-run and confirmed it still exercises the full
+  real `initialize` → `notifications/initialized` → `tools/call` handshake
+  unmodified otherwise.
+
+### Full suite regression check
+
+Ran `.venv/bin/python -m pytest -q` from the repo root twice in a row to
+rule out flakiness:
+
+- Run 1: **373 passed**, 0 failed, 36 warnings (same pre-existing
+  deprecation warnings as before, unrelated to this story).
+- Run 2: **373 passed**, 0 failed, 36 warnings — identical result, no
+  flakiness.
+
+373 = 358 (prior baseline from LFC-STORY-007-003) + 2 new unit tests already
+added by the backend agent to `tests/unit/test_mcp_server.py`
+(`test_get_goal_detail_view_query_selects_todos_ordered_by_sort_order`,
+`test_get_goal_detail_view_renders_empty_todos_list_when_goal_has_no_todos`)
++ 2 new unit tests already added by the backend agent to
+`tests/unit/test_ui_templates.py`
+(`test_goal_detail_data_to_dict_maps_multiple_todos_in_sort_order`,
+`test_goal_detail_data_to_dict_empty_todos_list`) + 11 new unit tests added
+by this QA pass to `tests/unit/test_ui_templates.py` = 373. The full suite
+run confirms this exactly: **373 passed, 0 failed**, across two consecutive
+runs.
+
+### Totals: 11 new automated tests (this QA pass) + 4 new automated tests
+(already added by the backend agent and confirmed accurate, not just
+trusted) = 15 new tests attributable to this story, 373/373 full suite
+passing across two consecutive runs, 0 failed, no flakiness. All 7
+acceptance criteria are covered by at least one test each: AC1/AC2 at the
+query/mapping level (backend agent's tests, re-verified), AC3/AC5/AC7 at the
+rendering-JS-source level (new), AC4 at the toggle-round-trip JS-source
+level (new), AC6 by confirming the size-reporting mechanism is structurally
+independent of and untouched by the new checklist section (new). No
+Playwright/E2E tests were added — this repo's own established precedent
+for MCP-UI views (`LFC-004-mcp-ui-home-goal-views/test-results.md`)
+explicitly determined browser E2E does not apply to this surface, since the
+HTML/JS is rendered by an external MCP-UI host this repo doesn't control
+and has no page/route of its own to drive with Playwright; the toggle
+round-trip against a real host remains an open verification item, the same
+class of caveat as LFC-004's `postMessage` bridge was before it was
+eventually confirmed working post-merge.

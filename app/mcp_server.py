@@ -23,6 +23,7 @@ from app.schemas import (
     UpdateListItem,
 )
 from app.ui_templates import (
+    GoalDetailTodo,
     GoalDetailUpdate,
     GoalDetailViewData,
     HomeGoalCard,
@@ -675,6 +676,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
                             description=None,
                             progress_percent=None,
                             recent_updates=[],
+                            todos=[],
                             error="This goal isn't available.",
                         )
                     )
@@ -692,6 +694,17 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
                     (str(returned_id),),
                 )
                 update_rows = await cursor.fetchall()
+
+                await cursor.execute(
+                    """
+                    SELECT id, text, done, sort_order
+                    FROM todos
+                    WHERE goal_id = %s
+                    ORDER BY sort_order ASC
+                    """,
+                    (str(returned_id),),
+                )
+                todo_rows = await cursor.fetchall()
     except Exception:
         logger.exception("get_goal_detail_view failed for caller %s", current_user.id)
         return goal_detail_data_to_dict(
@@ -701,6 +714,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
                 description=None,
                 progress_percent=None,
                 recent_updates=[],
+                todos=[],
                 error="This goal isn't available.",
             )
         )
@@ -708,6 +722,10 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
     recent_updates = [
         GoalDetailUpdate(content=content, created_at=created_at.isoformat())
         for content, created_at in update_rows
+    ]
+    todos = [
+        GoalDetailTodo(id=str(todo_id), text=text, done=done, sort_order=sort_order)
+        for todo_id, text, done, sort_order in todo_rows
     ]
 
     return goal_detail_data_to_dict(
@@ -717,6 +735,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
             description=description,
             progress_percent=progress_percent,
             recent_updates=recent_updates,
+            todos=todos,
         )
     )
 

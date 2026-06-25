@@ -18,6 +18,7 @@ the dataclasses these helpers convert, and
 import re
 
 from app.ui_templates import (
+    GoalDetailTodo,
     GoalDetailUpdate,
     GoalDetailViewData,
     HomeGoalCard,
@@ -462,6 +463,187 @@ def test_render_goal_detail_view_continue_button_interpolates_only_uuid_into_onc
 
 
 # ---------------------------------------------------------------------------
+# Todo checklist rendering (LFC-STORY-007-004): renderGoalDetailView's
+# embedded JS builds the checklist client-side from data.todos, so — same
+# constraint as every other renderGoalDetailView assertion in this file —
+# these tests assert against the JS *source*, not executed/rendered output.
+# No browser is executed anywhere in this suite; this matches the precedent
+# already established for goalCard's onclick and the delete/continue actions
+# above, and for the whole MCP Apps migration (see this file's module
+# docstring and knowledge/implementations/LFC-004-mcp-ui-home-goal-views/
+# test-results.md, which explicitly determined Playwright/browser E2E does
+# not apply to this repo's MCP-UI surface: the HTML/JS is rendered by an
+# external MCP-UI host - Claude Desktop or similar - that this repo doesn't
+# control and has no route/page of its own to drive with Playwright. This is
+# the first *interactive checklist* element, but not the first interactive
+# element overall - goalCard's onclick, the delete-confirm two-stage flow,
+# and continueGoal/toggleTodo's sibling pattern were already source-tested
+# this same way, so this section follows that established pattern rather
+# than introducing a new one.
+# ---------------------------------------------------------------------------
+
+
+def _render_goal_detail_view_function(html_output: str) -> str:
+    start = html_output.index("function renderGoalDetailView(")
+    body = html_output[start:]
+    return body[: body.index("\nfunction renderGoalDetailError")]
+
+
+def test_render_goal_detail_view_includes_todo_item_and_toggle_functions():
+    html_output = render_goal_detail_view()
+
+    assert "function todoItem(t)" in html_output
+    assert "function toggleTodo(todoId)" in html_output
+
+
+def test_render_goal_detail_view_renders_checklist_section_when_todos_present():
+    detail_fn = _render_goal_detail_view_function(render_goal_detail_view())
+
+    assert "data.todos && data.todos.length > 0" in detail_fn
+    assert "Checklist" in detail_fn
+    assert '<div class="todo-list">' in detail_fn
+    assert "todoItem(data.todos[t])" in detail_fn
+
+
+def test_render_goal_detail_view_iterates_todos_in_given_order():
+    """AC3: the checklist is built with a plain ascending for-loop over
+    data.todos, never sorted or reversed client-side - so render order is
+    exactly whatever order the server already provided (sort_order ASC,
+    per get_goal_detail_view's query)."""
+    detail_fn = _render_goal_detail_view_function(render_goal_detail_view())
+
+    loop_section = detail_fn[detail_fn.index("data.todos && data.todos.length > 0") :]
+    loop_section = loop_section[: loop_section.index("</div>';") + len("</div>';")]
+
+    assert "for (var t = 0; t < data.todos.length; t++)" in loop_section
+    assert "data.todos[t]" in loop_section
+
+
+def test_render_goal_detail_view_omits_checklist_entirely_when_todos_empty():
+    """AC7: a goal with zero todos must not render an empty/broken
+    checklist section - the section-label and todo-list wrapper are gated
+    behind the same `data.todos.length > 0` check, never rendered alone."""
+    detail_fn = _render_goal_detail_view_function(render_goal_detail_view())
+
+    checklist_branch = detail_fn[
+        detail_fn.index("if (data.todos") : detail_fn.index("html += '<p class=\"section-label\">Recent updates")
+    ]
+
+    assert checklist_branch.count("if (") == 1
+    assert '<div class="todo-list">' in checklist_branch
+
+
+def test_todo_item_function_renders_checkbox_and_text_reflecting_done_state():
+    """AC3: checklist item is a checkbox + text, struck-through when done."""
+    html_output = render_goal_detail_view()
+    todo_item_fn = html_output[html_output.index("function todoItem(t)") :]
+    todo_item_fn = todo_item_fn[: todo_item_fn.index("\nfunction toggleTodo")]
+
+    assert 'type="checkbox"' in todo_item_fn
+    assert "class=\"todo-checkbox\"" in todo_item_fn
+    assert "t.done ? ' checked' : ''" in todo_item_fn
+    assert "todo-done" in todo_item_fn
+    assert "t.done ? ' todo-done' : ''" in todo_item_fn
+    assert "safeText" in todo_item_fn
+    assert "escapeHtml(t.text)" in todo_item_fn
+
+
+def test_todo_item_onclick_interpolates_only_safe_id_never_free_text():
+    """Same onclick-interpolation-discipline property enforced for every
+    other interactive element in this file (goalCard, delete actions,
+    continueGoal): only the trusted server-generated todo id may be
+    interpolated into the onchange JS-string context, never the todo's
+    free-text, user-controlled `text` field."""
+    html_output = render_goal_detail_view()
+    todo_item_fn = html_output[html_output.index("function todoItem(t)") :]
+    todo_item_fn = todo_item_fn[: todo_item_fn.index("\nfunction toggleTodo")]
+
+    onchange_line = next(line for line in todo_item_fn.splitlines() if "onchange=" in line)
+
+    assert "toggleTodo(\\'' + safeId + '\\')" in onchange_line
+    assert "safeText" not in onchange_line
+
+
+def test_toggle_todo_calls_calltool_with_todo_id_and_disables_checkbox_first():
+    """AC4: clicking a todo's checkbox calls toggle_todo via window.callTool
+    with that todo's id; the checkbox disables itself immediately (so a
+    second click can't fire while the first call is still in flight)."""
+    html_output = render_goal_detail_view()
+    toggle_fn_start = html_output.index("function toggleTodo(todoId)")
+    toggle_fn = html_output[toggle_fn_start:]
+    toggle_fn = toggle_fn[: toggle_fn.index("\nfunction renderGoalDetailError")]
+
+    disable_idx = toggle_fn.index("checkbox.disabled = true")
+    calltool_idx = toggle_fn.index('window.callTool("toggle_todo"')
+    assert disable_idx < calltool_idx, "checkbox must disable before the tool call fires"
+
+    assert '{ todo_id: todoId }' in toggle_fn
+
+
+def test_toggle_todo_reconciles_checked_state_and_strikethrough_from_response():
+    """AC4: once the tool call resolves, the checkbox's checked state and
+    the text's strikethrough class must reflect the new done value from the
+    response, and the checkbox must re-enable regardless of the result."""
+    html_output = render_goal_detail_view()
+    toggle_fn_start = html_output.index("function toggleTodo(todoId)")
+    toggle_fn = html_output[toggle_fn_start:]
+    toggle_fn = toggle_fn[: toggle_fn.index("\nfunction renderGoalDetailError")]
+
+    assert "checkbox.checked = d.done" in toggle_fn
+    assert "checkbox.disabled = false" in toggle_fn
+    assert 'classList.add("todo-done")' in toggle_fn
+    assert 'classList.remove("todo-done")' in toggle_fn
+
+
+def test_render_goal_detail_view_has_no_add_edit_reorder_delete_todo_controls():
+    """AC5: no other todo control (add/edit/reorder/delete) appears
+    anywhere in the rendered output/JS - those remain conversational/
+    tool-only. Checks the full document, not just renderGoalDetailView's
+    body, since a stray control could in principle live elsewhere (e.g. in
+    a shared action-list)."""
+    html_output = render_goal_detail_view().lower()
+
+    for forbidden in (
+        "add todo",
+        "add a todo",
+        "new todo",
+        "edit todo",
+        "delete todo",
+        "reorder",
+        "create_todo",
+        "update_todo",
+        "delete_todo",
+        "reorder_todos",
+    ):
+        assert forbidden not in html_output
+
+
+def test_render_goal_detail_view_todo_section_styles_present_in_shared_stylesheet():
+    html_output = render_goal_detail_view()
+
+    for css_class in (".todo-list", ".todo-item", ".todo-checkbox", ".todo-text", ".todo-done"):
+        assert css_class in html_output
+
+
+def test_render_goal_detail_view_size_reporting_unaffected_by_todo_section():
+    """AC6: the iframe size-reporting mechanism (ui/notifications/
+    size-changed via reportSize()/ResizeObserver, established in
+    test_render_goal_detail_view_reports_size_changes_to_host above) is
+    declared once in the shared bridge JS, entirely independent of
+    renderGoalDetailView's body - adding the todo-checklist branch to
+    renderGoalDetailView cannot have touched it. Re-asserted here,
+    scoped to confirm reportSize's wiring still sits outside
+    renderGoalDetailView's own function body."""
+    html_output = render_goal_detail_view()
+    detail_fn = _render_goal_detail_view_function(html_output)
+
+    assert "reportSize" not in detail_fn
+    assert "ResizeObserver" not in detail_fn
+    assert 'method: "ui/notifications/size-changed"' in html_output
+    assert "new ResizeObserver(reportSize)" in html_output
+
+
+# ---------------------------------------------------------------------------
 # home_view_data_to_dict
 # ---------------------------------------------------------------------------
 
@@ -577,12 +759,14 @@ def test_home_view_data_to_dict_never_includes_transcript_key():
 
 def test_goal_detail_data_to_dict_maps_camel_case_fields():
     update = GoalDetailUpdate(content="Ran 3 miles today", created_at="2026-06-15T10:00:00+00:00")
+    todo = GoalDetailTodo(id="44444444-4444-4444-4444-444444444444", text="Buy running shoes", done=False, sort_order=0)
     data = GoalDetailViewData(
         id="33333333-3333-3333-3333-333333333333",
         title="Run a 5k",
         description="Train three times a week",
         progress_percent=42,
         recent_updates=[update],
+        todos=[todo],
     )
 
     result = goal_detail_data_to_dict(data)
@@ -595,6 +779,14 @@ def test_goal_detail_data_to_dict_maps_camel_case_fields():
         "recentUpdates": [
             {"content": "Ran 3 miles today", "createdAt": "2026-06-15T10:00:00+00:00"}
         ],
+        "todos": [
+            {
+                "id": "44444444-4444-4444-4444-444444444444",
+                "text": "Buy running shoes",
+                "done": False,
+                "sortOrder": 0,
+            }
+        ],
         "error": None,
     }
 
@@ -606,6 +798,7 @@ def test_goal_detail_data_to_dict_preserves_none_progress_percent_not_coerced_to
         description=None,
         progress_percent=None,
         recent_updates=[],
+        todos=[],
     )
 
     result = goal_detail_data_to_dict(data)
@@ -620,6 +813,7 @@ def test_goal_detail_data_to_dict_preserves_zero_progress_percent_distinct_from_
         description=None,
         progress_percent=0,
         recent_updates=[],
+        todos=[],
     )
 
     result = goal_detail_data_to_dict(data)
@@ -638,6 +832,7 @@ def test_goal_detail_data_to_dict_maps_multiple_recent_updates_in_order():
         description=None,
         progress_percent=42,
         recent_updates=updates,
+        todos=[],
     )
 
     result = goal_detail_data_to_dict(data)
@@ -652,6 +847,7 @@ def test_goal_detail_data_to_dict_empty_recent_updates_list():
         description=None,
         progress_percent=None,
         recent_updates=[],
+        todos=[],
     )
 
     result = goal_detail_data_to_dict(data)
@@ -659,14 +855,52 @@ def test_goal_detail_data_to_dict_empty_recent_updates_list():
     assert result["recentUpdates"] == []
 
 
+def test_goal_detail_data_to_dict_maps_multiple_todos_in_sort_order():
+    todos = [
+        GoalDetailTodo(id="44444444-4444-4444-4444-444444444444", text="First", done=False, sort_order=0),
+        GoalDetailTodo(id="55555555-5555-5555-5555-555555555555", text="Second", done=True, sort_order=1),
+    ]
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description=None,
+        progress_percent=42,
+        recent_updates=[],
+        todos=todos,
+    )
+
+    result = goal_detail_data_to_dict(data)
+
+    assert [t["text"] for t in result["todos"]] == ["First", "Second"]
+    assert [t["done"] for t in result["todos"]] == [False, True]
+    assert [t["sortOrder"] for t in result["todos"]] == [0, 1]
+
+
+def test_goal_detail_data_to_dict_empty_todos_list():
+    data = GoalDetailViewData(
+        id="33333333-3333-3333-3333-333333333333",
+        title="Run a 5k",
+        description=None,
+        progress_percent=None,
+        recent_updates=[],
+        todos=[],
+    )
+
+    result = goal_detail_data_to_dict(data)
+
+    assert result["todos"] == []
+
+
 def test_goal_detail_data_to_dict_error_short_circuits_before_any_other_data_leaks():
     update = GoalDetailUpdate(content="should not appear", created_at="2026-06-15T10:00:00+00:00")
+    todo = GoalDetailTodo(id="44444444-4444-4444-4444-444444444444", text="should not appear", done=False, sort_order=0)
     data = GoalDetailViewData(
         id="33333333-3333-3333-3333-333333333333",
         title="Run a 5k",
         description="Train three times a week",
         progress_percent=42,
         recent_updates=[update],
+        todos=[todo],
         error="This goal isn't available.",
     )
 
@@ -678,6 +912,7 @@ def test_goal_detail_data_to_dict_error_short_circuits_before_any_other_data_lea
     assert "description" not in result
     assert "progressPercent" not in result
     assert "recentUpdates" not in result
+    assert "todos" not in result
 
 
 def test_goal_detail_data_to_dict_no_error_sets_error_key_to_none_explicitly():
@@ -687,6 +922,7 @@ def test_goal_detail_data_to_dict_no_error_sets_error_key_to_none_explicitly():
         description=None,
         progress_percent=None,
         recent_updates=[],
+        todos=[],
     )
 
     result = goal_detail_data_to_dict(data)
@@ -703,6 +939,7 @@ def test_goal_detail_data_to_dict_never_includes_transcript_key():
         description="Train three times a week",
         progress_percent=42,
         recent_updates=[update],
+        todos=[],
     )
 
     result = goal_detail_data_to_dict(data)

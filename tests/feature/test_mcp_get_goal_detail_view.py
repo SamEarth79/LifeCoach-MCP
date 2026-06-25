@@ -180,7 +180,8 @@ async def test_get_goal_detail_view_through_live_mcp_transport_returns_html_reso
 ):
     goal_row = (GOAL_ID, "Run a 5k", "Train three times a week", 42)
     update_rows = [("Ran 3 miles today", CREATED_AT)]
-    fake_connection, captured = _patch_db(monkeypatch, [goal_row, update_rows])
+    todo_rows = []
+    fake_connection, captured = _patch_db(monkeypatch, [goal_row, update_rows, todo_rows])
     _patch_user_upsert(monkeypatch)
     token = _make_token()
 
