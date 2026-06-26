@@ -339,6 +339,22 @@ body {
   color: #a39a8f;
   text-decoration: line-through;
 }
+.todo-delete {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  color: #c0b5aa;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 6px;
+}
+.todo-delete:hover {
+  color: #c0392b;
+  background: #fdf0ee;
+}
 .action-list {
   display: flex;
   flex-direction: column;
@@ -635,10 +651,11 @@ function todoItem(t) {
   var safeText = escapeHtml(t.text);
   var checkedAttr = t.done ? ' checked' : '';
   var textClass = t.done ? ' todo-done' : '';
-  return '<div class="todo-item">' +
+  return '<div class="todo-item" id="todo-item-' + safeId + '">' +
     '<input class="todo-checkbox" type="checkbox" id="todo-checkbox-' + safeId + '"' + checkedAttr +
     ' onchange="toggleTodo(\\'' + safeId + '\\')">' +
-    '<span class="todo-text' + textClass + '" id="todo-text-' + safeId + '">' + safeText + '</span></div>';
+    '<span class="todo-text' + textClass + '" id="todo-text-' + safeId + '">' + safeText + '</span>' +
+    '<button class="todo-delete" type="button" title="Delete" onclick="deleteTodo(\\'' + safeId + '\\')">&#x2715;</button></div>';
 }
 
 function toggleTodo(todoId) {
@@ -655,6 +672,17 @@ function toggleTodo(todoId) {
       if (d.done) text.classList.add("todo-done");
       else text.classList.remove("todo-done");
     }
+  });
+}
+
+function deleteTodo(todoId) {
+  var btn = document.querySelector('#todo-item-' + todoId + ' .todo-delete');
+  if (btn) btn.disabled = true;
+  window.callTool("delete_todo", { todo_id: todoId }).then(function() {
+    var item = document.getElementById("todo-item-" + todoId);
+    if (item) item.remove();
+  }).catch(function() {
+    if (btn) btn.disabled = false;
   });
 }
 
