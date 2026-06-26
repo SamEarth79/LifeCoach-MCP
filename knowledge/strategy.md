@@ -48,10 +48,18 @@
   a life-coach app.
 
 **MCP-UI usage**
-- Used only for read-only displays: goal list, progress views, suggestion
-  history. All input (new goals, check-ins, suggestions) stays
+- Primarily read-only displays: goal list, progress views, suggestion
+  history. Most input (new goals, check-ins, suggestions) stays
   conversational text, not structured UI input — keeps the UI layer simple
   given the light UI requirements.
+- Exception (added 2026-06-25, goal todos feature): the goal detail view's
+  todo list has interactive checkboxes that call a `toggle_todo` tool
+  directly from the UI. Scoped narrowly to toggling todo completion only —
+  creating, editing, reordering, or deleting todos still happens
+  conversationally through the LLM. Reasoning: marking a step done is a
+  single, low-risk, unambiguous action well-suited to a tap; it doesn't
+  carry the ambiguity of freeform input that the read-only-by-default rule
+  was meant to avoid.
 
 **Security & technical baseline (folded into v1, not deferred)**
 - Per-user data isolation enforced via Supabase Row Level Security (RLS)

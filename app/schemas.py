@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 class GoalCreate(BaseModel):
     title: str = Field(min_length=1)
     description: str | None = None
+    todos: list[str] | None = Field(default=None)
 
     @field_validator("title")
     @classmethod
@@ -14,6 +15,19 @@ class GoalCreate(BaseModel):
         if not stripped:
             raise ValueError("title must not be empty or whitespace-only")
         return stripped
+
+    @field_validator("todos")
+    @classmethod
+    def reject_blank_todos(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        stripped_todos = []
+        for todo in value:
+            stripped = todo.strip()
+            if not stripped:
+                raise ValueError("todos must not contain empty or whitespace-only strings")
+            stripped_todos.append(stripped)
+        return stripped_todos
 
 
 class GoalUpdate(BaseModel):
@@ -73,6 +87,46 @@ class UpdateListItem(BaseModel):
     content: str
     source: str
     created_at: str
+
+
+class TodoCreate(BaseModel):
+    goal_id: UUID
+    text: str = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text must not be empty or whitespace-only")
+        return stripped
+
+
+class TodoUpdate(BaseModel):
+    text: str = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("text must not be empty or whitespace-only")
+        return stripped
+
+
+class TodoResponse(BaseModel):
+    id: str
+    goal_id: str
+    text: str
+    done: bool
+    sort_order: int
+    created_at: str
+    updated_at: str
+
+
+class TodoReorder(BaseModel):
+    goal_id: UUID
+    todo_ids: list[UUID]
 
 
 class GoalProgressUpdate(BaseModel):

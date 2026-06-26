@@ -16,12 +16,21 @@ class GoalDetailUpdate:
 
 
 @dataclass
+class GoalDetailTodo:
+    id: str
+    text: str
+    done: bool
+    sort_order: int
+
+
+@dataclass
 class GoalDetailViewData:
     id: str | None
     title: str | None
     description: str | None
     progress_percent: int | None
     recent_updates: list[GoalDetailUpdate]
+    todos: list[GoalDetailTodo]
     error: str | None = None
 
 
@@ -61,6 +70,10 @@ def goal_detail_data_to_dict(data: GoalDetailViewData) -> dict:
         "recentUpdates": [
             {"content": u.content, "createdAt": u.created_at}
             for u in data.recent_updates
+        ],
+        "todos": [
+            {"id": t.id, "text": t.text, "done": t.done, "sortOrder": t.sort_order}
+            for t in data.todos
         ],
         "error": None,
     }
@@ -291,6 +304,40 @@ body {
   font-size: 13px;
   color: #9a9082;
   margin: 0 0 24px;
+}
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #ffffff;
+  border: 1px solid #ece3d8;
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+.todo-checkbox {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #416352;
+}
+.todo-checkbox:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.todo-text {
+  font-size: 13px;
+  color: #1f1b17;
+}
+.todo-text.todo-done {
+  color: #a39a8f;
+  text-decoration: line-through;
 }
 .action-list {
   display: flex;
@@ -552,6 +599,14 @@ function renderGoalDetailView(data) {
   if (data.description) {
     html += '<p class="detail-description">' + escapeHtml(data.description) + '</p>';
   }
+  if (data.todos && data.todos.length > 0) {
+    html += '<p class="section-label">Checklist</p>';
+    html += '<div class="todo-list">';
+    for (var t = 0; t < data.todos.length; t++) {
+      html += todoItem(data.todos[t]);
+    }
+    html += '</div>';
+  }
   html += '<p class="section-label">Recent updates</p>';
   if (data.recentUpdates && data.recentUpdates.length > 0) {
     html += '<div class="update-list">';
@@ -573,6 +628,34 @@ function renderGoalDetailView(data) {
     '<button class="delete-confirm-btn confirm" type="button" onclick="confirmDelete(\\'' + safeId + '\\')">Confirm</button>' +
     '<button class="delete-confirm-btn cancel" type="button" onclick="cancelDeleteConfirm(\\'' + safeId + '\\')">Cancel</button></div></div>';
   return html;
+}
+
+function todoItem(t) {
+  var safeId = escapeHtml(t.id);
+  var safeText = escapeHtml(t.text);
+  var checkedAttr = t.done ? ' checked' : '';
+  var textClass = t.done ? ' todo-done' : '';
+  return '<div class="todo-item">' +
+    '<input class="todo-checkbox" type="checkbox" id="todo-checkbox-' + safeId + '"' + checkedAttr +
+    ' onchange="toggleTodo(\\'' + safeId + '\\')">' +
+    '<span class="todo-text' + textClass + '" id="todo-text-' + safeId + '">' + safeText + '</span></div>';
+}
+
+function toggleTodo(todoId) {
+  var checkbox = document.getElementById("todo-checkbox-" + todoId);
+  var text = document.getElementById("todo-text-" + todoId);
+  if (checkbox) checkbox.disabled = true;
+  window.callTool("toggle_todo", { todo_id: todoId }).then(function(r) {
+    var d = r.structuredContent || JSON.parse(r.content[0].text);
+    if (checkbox) {
+      checkbox.checked = d.done;
+      checkbox.disabled = false;
+    }
+    if (text) {
+      if (d.done) text.classList.add("todo-done");
+      else text.classList.remove("todo-done");
+    }
+  });
 }
 
 function renderGoalDetailError(error) {

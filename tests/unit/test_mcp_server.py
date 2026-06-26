@@ -710,7 +710,9 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
 ):
     goal_row = (GOAL_ID, "Run a 5k", "Train three times a week", 42)
     update_rows = [("Ran 3 miles today", CREATED_AT)]
-    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, update_rows])
+    todo_id = "44444444-4444-4444-4444-444444444444"
+    todo_rows = [(todo_id, "Buy running shoes", False, 0)]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, update_rows, todo_rows])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -721,6 +723,9 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
     assert result["description"] == "Train three times a week"
     assert result["progressPercent"] == 42
     assert result["recentUpdates"][0]["content"] == "Ran 3 miles today"
+    assert result["todos"][0]["text"] == "Buy running shoes"
+    assert result["todos"][0]["done"] is False
+    assert result["todos"][0]["sortOrder"] == 0
     assert "transcript" not in str(result).lower()
     assert captured["user_id"] == USER_ID
 
@@ -729,7 +734,7 @@ async def test_get_goal_detail_view_returns_embedded_resource_with_title_descrip
 async def test_get_goal_detail_view_query_selects_only_content_and_created_at_for_updates(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
     update_rows = []
-    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, update_rows])
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, update_rows, []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -743,9 +748,25 @@ async def test_get_goal_detail_view_query_selects_only_content_and_created_at_fo
 
 
 @pytest.mark.asyncio
+async def test_get_goal_detail_view_query_selects_todos_ordered_by_sort_order(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [goal_row, [], []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    todos_query, todos_params = fake_connection.cursor_instance.executed[2]
+    assert "SELECT id, text, done, sort_order" in todos_query
+    assert "FROM todos" in todos_query
+    assert "ORDER BY sort_order ASC" in todos_query
+    assert todos_params == (GOAL_ID,)
+
+
+@pytest.mark.asyncio
 async def test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_empty(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -755,9 +776,21 @@ async def test_get_goal_detail_view_renders_no_updates_yet_when_recent_updates_e
 
 
 @pytest.mark.asyncio
+async def test_get_goal_detail_view_renders_empty_todos_list_when_goal_has_no_todos(monkeypatch):
+    goal_row = (GOAL_ID, "Run a 5k", None, None)
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    result = await mcp_server.get_goal_detail_view(goal_id=GOAL_ID, ctx=_fake_context("Bearer faketoken"))
+
+    assert result["todos"] == []
+
+
+@pytest.mark.asyncio
 async def test_get_goal_detail_view_renders_no_estimate_yet_when_progress_percent_is_null(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -830,7 +863,7 @@ async def test_get_goal_detail_view_rejects_malformed_goal_id_before_db_call(mon
 @pytest.mark.asyncio
 async def test_get_goal_detail_view_enforces_rate_limit_before_jwt_verification(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    _patch_db_sequenced(monkeypatch, [goal_row, []])
+    _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     call_order = []
 
     async def _record_rate_limit(*_args, **_kwargs):
@@ -881,7 +914,7 @@ async def test_get_goal_detail_view_jwt_verification_before_uuid_validation_only
 @pytest.mark.asyncio
 async def test_get_goal_detail_view_query_has_no_app_level_user_id_clause(monkeypatch):
     goal_row = (GOAL_ID, "Run a 5k", None, None)
-    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, []])
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [goal_row, [], []])
     _patch_auth(monkeypatch)
     _patch_rate_limit(monkeypatch)
 
@@ -1269,6 +1302,126 @@ async def test_create_goal_success_path_uses_shared_fetch_home_view_data_helper(
     assert "home_view_data_to_dict" in create_source
 
 
+@pytest.mark.asyncio
+async def test_create_goal_with_todos_persists_each_todo_in_order_with_zero_indexed_sort_order(monkeypatch):
+    # Covers AC1/AC2/AC6: a non-empty `todos` list results in that many
+    # todo rows persisted for the new goal, in the given order, with
+    # sort_order assigned by list position (0-indexed). The goal INSERT
+    # uses RETURNING id (consumed by the first fetchone()), so the new
+    # goal's id is fed back into each todo INSERT.
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, [(GOAL_ID,), *refresh_responses])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.create_goal(
+        title="Run a 5k",
+        ctx=_fake_context("Bearer faketoken"),
+        todos=["Buy running shoes", "Plan a route", "Schedule first run"],
+    )
+
+    insert_goal_query, insert_goal_params = fake_connection.cursor_instance.executed[0]
+    assert "INSERT INTO goals" in insert_goal_query
+    assert "RETURNING id" in insert_goal_query
+    assert insert_goal_params == (USER_ID, "Run a 5k", None)
+
+    todo_inserts = fake_connection.cursor_instance.executed[1:4]
+    expected_todos = ["Buy running shoes", "Plan a route", "Schedule first run"]
+    for sort_order, (todo_query, todo_params) in enumerate(todo_inserts):
+        assert "INSERT INTO todos" in todo_query
+        assert todo_params == (USER_ID, GOAL_ID, expected_todos[sort_order], sort_order)
+
+    assert fake_connection.committed is True
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_create_goal_rejects_blank_todo_in_list_before_db_call(monkeypatch):
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, [])
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    with pytest.raises(ValueError):
+        await mcp_server.create_goal(
+            title="Run a 5k",
+            ctx=_fake_context("Bearer faketoken"),
+            todos=["Buy running shoes", "   "],
+        )
+
+    assert fake_connection.cursor_instance.executed == []
+
+
+@pytest.mark.asyncio
+async def test_create_goal_with_omitted_todos_runs_the_same_single_insert_as_before_this_story(monkeypatch):
+    # AC3: when `todos` is omitted, behavior must be identical to the
+    # pre-story query shape — a single INSERT with no RETURNING and no
+    # todo inserts. Mirrors
+    # test_create_goal_inserts_row_with_verified_user_id_title_and_description
+    # exactly, just calling the function without the new parameter at all.
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    fake_connection, captured = _patch_db_sequenced(monkeypatch, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.create_goal(
+        title="Run a 5k",
+        description="Train three times a week",
+        ctx=_fake_context("Bearer faketoken"),
+    )
+
+    insert_query, insert_params = fake_connection.cursor_instance.executed[0]
+    assert "INSERT INTO goals" in insert_query
+    assert "RETURNING" not in insert_query
+    assert insert_params == (USER_ID, "Run a 5k", "Train three times a week")
+    assert not any("INSERT INTO todos" in query for query, _ in fake_connection.cursor_instance.executed)
+    assert fake_connection.committed is True
+    assert captured["user_id"] == USER_ID
+
+
+@pytest.mark.asyncio
+async def test_create_goal_with_empty_todos_list_runs_the_same_single_insert_as_omitted(monkeypatch):
+    # AC3 also covers an explicitly empty list, not just an omitted
+    # argument — `if goal.todos:` is falsy for `[]` too.
+    refresh_responses = [("Sam", "sam@example.com"), [(GOAL_ID, "Run a 5k", None)], []]
+    fake_connection, _ = _patch_db_sequenced(monkeypatch, refresh_responses)
+    _patch_auth(monkeypatch)
+    _patch_rate_limit(monkeypatch)
+
+    await mcp_server.create_goal(
+        title="Run a 5k",
+        ctx=_fake_context("Bearer faketoken"),
+        todos=[],
+    )
+
+    insert_query, _ = fake_connection.cursor_instance.executed[0]
+    assert "RETURNING" not in insert_query
+    assert not any("INSERT INTO todos" in query for query, _ in fake_connection.cursor_instance.executed)
+
+
+def test_goal_create_rejects_blank_todo_in_list():
+    from pydantic import ValidationError
+
+    from app.schemas import GoalCreate
+
+    with pytest.raises(ValidationError):
+        GoalCreate(title="Run a 5k", todos=["Buy running shoes", "   "])
+
+
+def test_goal_create_strips_surrounding_whitespace_from_each_todo():
+    from app.schemas import GoalCreate
+
+    goal = GoalCreate(title="Run a 5k", todos=["  Buy running shoes  ", "Plan a route"])
+
+    assert goal.todos == ["Buy running shoes", "Plan a route"]
+
+
+def test_goal_create_allows_omitted_or_none_todos():
+    from app.schemas import GoalCreate
+
+    assert GoalCreate(title="Run a 5k").todos is None
+    assert GoalCreate(title="Run a 5k", todos=None).todos is None
+
+
 def test_create_goal_tool_description_instructs_caller_on_when_to_call_it():
     tool = mcp_server.mcp._tool_manager._tools["create_goal"]
 
@@ -1410,6 +1563,37 @@ def test_server_instructions_tell_claude_to_set_progress_alongside_every_update(
     assert "whenever you call record_update" in instructions.lower()
     assert "also call set_goal_progress" in instructions.lower()
     assert "no numeric target" in instructions.lower()
+
+
+def test_server_instructions_tell_claude_to_suggest_todos_on_goal_creation():
+    # AC4: instructions must direct the LLM to suggest 3-5 subgoal-style
+    # todos whenever it creates a goal, populating the new `todos` argument.
+    instructions = mcp_server.mcp.instructions
+
+    assert "3-5" in instructions
+    assert "todo" in instructions.lower()
+    assert "create a goal" in instructions.lower() or "create_goal" in instructions.lower()
+
+
+def test_server_instructions_tell_claude_to_use_todo_crud_tools_conversationally():
+    # AC5: instructions must direct the LLM to use create_todo/update_todo/
+    # toggle_todo/delete_todo/reorder_todos whenever the user conversationally
+    # asks to add, change, complete, remove, or reorder todos.
+    instructions = mcp_server.mcp.instructions
+
+    for tool_name in ("create_todo", "update_todo", "toggle_todo", "delete_todo", "reorder_todos"):
+        assert tool_name in instructions
+
+
+def test_create_goal_tool_description_instructs_suggesting_todos_at_creation():
+    # AC4 (alternate location): the create_goal tool description itself
+    # also carries the suggest-3-5-todos instruction.
+    tool = mcp_server.mcp._tool_manager._tools["create_goal"]
+
+    description = tool.description.lower()
+
+    assert "3-5" in description
+    assert "todo" in description
 
 
 def test_coach_prompt_is_registered_and_not_auto_invoked():

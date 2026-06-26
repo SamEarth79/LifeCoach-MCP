@@ -12,8 +12,18 @@ from app.auth import verify_bearer_token
 from app.config import get_settings
 from app.db import get_rls_connection
 from app.rate_limit import enforce_mcp_rate_limit
-from app.schemas import GoalCreate, GoalProgressUpdate, UpdateCreate, UpdateListItem
+from app.schemas import (
+    GoalCreate,
+    GoalProgressUpdate,
+    TodoCreate,
+    TodoReorder,
+    TodoResponse,
+    TodoUpdate,
+    UpdateCreate,
+    UpdateListItem,
+)
 from app.ui_templates import (
+    GoalDetailTodo,
     GoalDetailUpdate,
     GoalDetailViewData,
     HomeGoalCard,
@@ -43,7 +53,17 @@ _COACH_INSTRUCTIONS = (
     "blank progress ring is worse than an imperfect estimate. Don't "
     "show a UI view (get_home_view/get_goal_detail_view) just to "
     "narrate progress mid-conversation — show it when the user is "
-    "navigating between goals, not as a substitute for talking."
+    "navigating between goals, not as a substitute for talking. "
+    "Whenever you create a goal, suggest 3-5 concrete, subgoal-style "
+    "todos for it in the same create_goal call, so the user starts with "
+    "a checklist of next steps instead of a blank goal — ground them in "
+    "whatever the user already told you, not generic filler. Once a "
+    "goal has todos, treat them as a living checklist: whenever the "
+    "user conversationally asks to add, change, complete, remove, or "
+    "reorder a todo for an existing goal, use create_todo, update_todo, "
+    "toggle_todo, delete_todo, or reorder_todos to keep it in sync — "
+    "don't just acknowledge the request in conversation without "
+    "actually updating the checklist."
 )
 
 mcp = FastMCP(
@@ -230,6 +250,267 @@ async def set_goal_progress(
     }
 
 
+def _todo_row_to_response(row: tuple) -> dict:
+    todo_id, goal_id, text, done, sort_order, created_at, updated_at = row
+    return TodoResponse(
+        id=str(todo_id),
+        goal_id=str(goal_id),
+        text=text,
+        done=done,
+        sort_order=sort_order,
+        created_at=created_at.isoformat(),
+        updated_at=updated_at.isoformat(),
+    ).model_dump()
+
+
+@mcp.tool(
+    description=(
+        "Add a todo (subgoal step) to one of the user's goals. Call this "
+        "when you and the user agree on a concrete next step worth "
+        "tracking as a checklist item. The new todo is appended to the "
+        "end of the goal's existing todo list. Returns the created todo."
+    )
+)
+async def create_todo(goal_id: str, text: str, ctx: Context) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        todo = TodoCreate(goal_id=goal_id, text=text)
+    except ValidationError as exc:
+        logger.warning("create_todo validation failed: %s", exc)
+        raise ValueError(str(exc)) from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO todos (user_id, goal_id, text, sort_order)
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    COALESCE(
+                        (SELECT MAX(sort_order) + 1 FROM todos WHERE goal_id = %s),
+                        0
+                    )
+                )
+                RETURNING id, goal_id, text, done, sort_order, created_at, updated_at
+                """,
+                (current_user.id, str(todo.goal_id), todo.text, str(todo.goal_id)),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise ValueError(
+                    "goal_id does not exist, is not owned by the caller, or is deleted"
+                )
+        await conn.commit()
+
+    return _todo_row_to_response(row)
+
+
+@mcp.tool(
+    description=(
+        "Update the text of one of the user's existing todos. Call this "
+        "when the user wants to rephrase or correct a checklist item, not "
+        "to mark it complete — use toggle_todo for that. Returns the "
+        "updated todo, or a clear not-found result if the todo doesn't "
+        "exist or isn't owned by the user."
+    )
+)
+async def update_todo(todo_id: str, text: str, ctx: Context) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        validated_todo_id = UUID(todo_id)
+        todo = TodoUpdate(text=text)
+    except (ValueError, ValidationError) as exc:
+        logger.warning("update_todo validation failed: %s", exc)
+        raise ValueError(str(exc)) from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE todos
+                SET text = %s, updated_at = now()
+                WHERE id = %s
+                RETURNING id, goal_id, text, done, sort_order, created_at, updated_at
+                """,
+                (todo.text, str(validated_todo_id)),
+            )
+            row = await cursor.fetchone()
+        await conn.commit()
+
+    if row is None:
+        return {"found": False, "error": "todo not found or not owned by the caller"}
+
+    return {"found": True, **_todo_row_to_response(row)}
+
+
+@mcp.tool(
+    description=(
+        "Flip the completion state of one of the user's todos (incomplete "
+        "becomes complete, complete becomes incomplete). Call this when "
+        "the user reports finishing or reopening a checklist item, or in "
+        "response to the user tapping the todo's checkbox in the UI. "
+        "Returns the updated todo."
+    )
+)
+async def toggle_todo(todo_id: str, ctx: Context) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        validated_todo_id = UUID(todo_id)
+    except ValueError as exc:
+        logger.warning("toggle_todo validation failed: %s", exc)
+        raise ValueError("todo_id must be a valid UUID") from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                UPDATE todos
+                SET done = NOT done, updated_at = now()
+                WHERE id = %s
+                RETURNING id, goal_id, text, done, sort_order, created_at, updated_at
+                """,
+                (str(validated_todo_id),),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                raise ValueError("todo_id does not exist or is not owned by the caller")
+        await conn.commit()
+
+    return _todo_row_to_response(row)
+
+
+@mcp.tool(
+    description=(
+        "Permanently remove one of the user's todos. Call this when the "
+        "user wants a checklist item gone entirely, not just marked done "
+        "— use toggle_todo for completion. Has no effect if the todo "
+        "doesn't exist or isn't owned by the user. Returns confirmation."
+    )
+)
+async def delete_todo(todo_id: str, ctx: Context) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        validated_todo_id = UUID(todo_id)
+    except ValueError as exc:
+        logger.warning("delete_todo validation failed: %s", exc)
+        raise ValueError("todo_id must be a valid UUID") from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                DELETE FROM todos
+                WHERE id = %s
+                RETURNING id
+                """,
+                (str(validated_todo_id),),
+            )
+            row = await cursor.fetchone()
+        await conn.commit()
+
+    return {"deleted": row is not None, "todo_id": str(validated_todo_id)}
+
+
+@mcp.tool(
+    description=(
+        "List all todos for one of the user's goals, ordered to match the "
+        "order shown in the UI. Use this to check what subgoal steps "
+        "already exist before adding more, or to ground a conversation "
+        "about what's left to do."
+    )
+)
+async def list_todos(goal_id: str, ctx: Context) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        validated_goal_id = UUID(goal_id)
+    except ValueError as exc:
+        logger.warning("list_todos validation failed: %s", exc)
+        raise ValueError("goal_id must be a valid UUID") from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                """
+                SELECT id, goal_id, text, done, sort_order, created_at, updated_at
+                FROM todos
+                WHERE goal_id = %s
+                ORDER BY sort_order ASC
+                """,
+                (str(validated_goal_id),),
+            )
+            rows = await cursor.fetchall()
+
+    return {"todos": [_todo_row_to_response(row) for row in rows]}
+
+
+@mcp.tool(
+    description=(
+        "Rewrite the display order of one of the user's goal's todos to "
+        "match the given order. Call this when the user wants to "
+        "reprioritize or reorder their checklist. `todo_ids` must list "
+        "every todo id for the goal, in the desired new order."
+    )
+)
+async def reorder_todos(goal_id: str, todo_ids: list[str], ctx: Context) -> dict:
+    request = ctx.request_context.request
+    await enforce_mcp_rate_limit(request)
+
+    authorization_header = request.headers.get("authorization") if request is not None else None
+    current_user = await verify_bearer_token(authorization_header)
+
+    try:
+        reorder = TodoReorder(goal_id=goal_id, todo_ids=todo_ids)
+    except ValidationError as exc:
+        logger.warning("reorder_todos validation failed: %s", exc)
+        raise ValueError(str(exc)) from exc
+
+    async with get_rls_connection(current_user.id) as conn:
+        async with conn.cursor() as cursor:
+            for position, todo_id in enumerate(reorder.todo_ids):
+                await cursor.execute(
+                    """
+                    UPDATE todos
+                    SET sort_order = %s, updated_at = now()
+                    WHERE id = %s AND goal_id = %s
+                    """,
+                    (position, str(todo_id), str(reorder.goal_id)),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        f"todo {todo_id} does not exist or does not belong to goal_id"
+                    )
+        await conn.commit()
+
+    return {"goal_id": str(reorder.goal_id), "todo_ids": [str(tid) for tid in reorder.todo_ids]}
+
+
 async def _fetch_home_view_data(user_id: str) -> HomeViewData:
     async with get_rls_connection(user_id) as conn:
         async with conn.cursor() as cursor:
@@ -399,6 +680,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
                             description=None,
                             progress_percent=None,
                             recent_updates=[],
+                            todos=[],
                             error="This goal isn't available.",
                         )
                     )
@@ -416,6 +698,17 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
                     (str(returned_id),),
                 )
                 update_rows = await cursor.fetchall()
+
+                await cursor.execute(
+                    """
+                    SELECT id, text, done, sort_order
+                    FROM todos
+                    WHERE goal_id = %s
+                    ORDER BY sort_order ASC
+                    """,
+                    (str(returned_id),),
+                )
+                todo_rows = await cursor.fetchall()
     except Exception:
         logger.exception("get_goal_detail_view failed for caller %s", current_user.id)
         return goal_detail_data_to_dict(
@@ -425,6 +718,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
                 description=None,
                 progress_percent=None,
                 recent_updates=[],
+                todos=[],
                 error="This goal isn't available.",
             )
         )
@@ -432,6 +726,10 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
     recent_updates = [
         GoalDetailUpdate(content=content, created_at=created_at.isoformat())
         for content, created_at in update_rows
+    ]
+    todos = [
+        GoalDetailTodo(id=str(todo_id), text=text, done=done, sort_order=sort_order)
+        for todo_id, text, done, sort_order in todo_rows
     ]
 
     return goal_detail_data_to_dict(
@@ -441,6 +739,7 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
             description=description,
             progress_percent=progress_percent,
             recent_updates=recent_updates,
+            todos=todos,
         )
     )
 
@@ -451,12 +750,17 @@ async def get_goal_detail_view(goal_id: str, ctx: Context) -> dict:
         "have actually agreed on a clear title for what they want to work "
         "on — not before they've described it. Optionally include a short "
         "`description` capturing what they want to achieve, their "
-        "timeline, or why it matters, if they shared that. On success, "
-        "returns a refreshed home screen UI resource reflecting the new "
-        "goal."
+        "timeline, or why it matters, if they shared that. Also suggest 3-5 "
+        "concrete, subgoal-style first steps in `todos` so the user starts "
+        "with a checklist instead of a blank goal — base them on whatever "
+        "the user has already shared, and keep each one short and "
+        "actionable. On success, returns a refreshed home screen UI "
+        "resource reflecting the new goal."
     )
 )
-async def create_goal(title: str, ctx: Context, description: str | None = None) -> dict:
+async def create_goal(
+    title: str, ctx: Context, description: str | None = None, todos: list[str] | None = None
+) -> dict:
     request = ctx.request_context.request
     await enforce_mcp_rate_limit(request)
 
@@ -464,20 +768,39 @@ async def create_goal(title: str, ctx: Context, description: str | None = None) 
     current_user = await verify_bearer_token(authorization_header)
 
     try:
-        goal = GoalCreate(title=title, description=description)
+        goal = GoalCreate(title=title, description=description, todos=todos)
     except ValidationError as exc:
         logger.warning("create_goal validation failed: %s", exc)
         raise ValueError(str(exc)) from exc
 
     async with get_rls_connection(current_user.id) as conn:
         async with conn.cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO goals (user_id, title, description)
-                VALUES (%s, %s, %s)
-                """,
-                (current_user.id, goal.title, goal.description),
-            )
+            if goal.todos:
+                await cursor.execute(
+                    """
+                    INSERT INTO goals (user_id, title, description)
+                    VALUES (%s, %s, %s)
+                    RETURNING id
+                    """,
+                    (current_user.id, goal.title, goal.description),
+                )
+                (new_goal_id,) = await cursor.fetchone()
+                for sort_order, todo_text in enumerate(goal.todos):
+                    await cursor.execute(
+                        """
+                        INSERT INTO todos (user_id, goal_id, text, sort_order)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (current_user.id, str(new_goal_id), todo_text, sort_order),
+                    )
+            else:
+                await cursor.execute(
+                    """
+                    INSERT INTO goals (user_id, title, description)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (current_user.id, goal.title, goal.description),
+                )
         await conn.commit()
 
     try:
