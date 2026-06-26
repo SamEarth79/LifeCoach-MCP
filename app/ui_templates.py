@@ -278,19 +278,38 @@ body {
 .update-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   margin-bottom: 24px;
+  padding-left: 8px;
 }
 .update-item {
-  background: #ffffff;
-  border: 1px solid #ece3d8;
-  border-radius: 12px;
-  padding: 12px 16px;
+  display: flex;
+  gap: 14px;
+  position: relative;
+}
+.update-item:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 18px;
+  bottom: -12px;
+  width: 2px;
+  background: #ece3d8;
+}
+.update-dot {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #416352;
+  margin-top: 3px;
+}
+.update-body {
+  padding-bottom: 20px;
 }
 .update-content {
   font-size: 13px;
   color: #1f1b17;
-  margin: 0 0 4px;
+  margin: 0 0 3px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -629,8 +648,10 @@ function renderGoalDetailView(data) {
     for (var i = 0; i < data.recentUpdates.length; i++) {
       var u = data.recentUpdates[i];
       var safeContent = escapeHtml(u.content);
-      html += '<div class="update-item"><p class="update-content">' + safeContent + '</p>' +
-        '<span class="update-date">' + escapeHtml(formatDate(u.createdAt)) + '</span></div>';
+      html += '<div class="update-item">' +
+        '<div class="update-dot"></div>' +
+        '<div class="update-body"><p class="update-content">' + safeContent + '</p>' +
+        '<span class="update-date">' + escapeHtml(formatDate(u.createdAt)) + '</span></div></div>';
     }
     html += '</div>';
   } else {
