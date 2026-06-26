@@ -595,12 +595,10 @@ def test_toggle_todo_reconciles_checked_state_and_strikethrough_from_response():
     assert 'classList.remove("todo-done")' in toggle_fn
 
 
-def test_render_goal_detail_view_has_no_add_edit_reorder_delete_todo_controls():
-    """AC5: no other todo control (add/edit/reorder/delete) appears
-    anywhere in the rendered output/JS - those remain conversational/
-    tool-only. Checks the full document, not just renderGoalDetailView's
-    body, since a stray control could in principle live elsewhere (e.g. in
-    a shared action-list)."""
+def test_render_goal_detail_view_has_no_add_edit_reorder_todo_controls():
+    """AC5: add/edit/reorder todo controls remain conversational/tool-only
+    and must not appear in the rendered UI. Delete is permitted — there is
+    an explicit per-item delete button. Checks the full document."""
     html_output = render_goal_detail_view().lower()
 
     for forbidden in (
@@ -608,11 +606,9 @@ def test_render_goal_detail_view_has_no_add_edit_reorder_delete_todo_controls():
         "add a todo",
         "new todo",
         "edit todo",
-        "delete todo",
         "reorder",
         "create_todo",
         "update_todo",
-        "delete_todo",
         "reorder_todos",
     ):
         assert forbidden not in html_output

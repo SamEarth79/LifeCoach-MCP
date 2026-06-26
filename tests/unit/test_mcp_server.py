@@ -1565,13 +1565,13 @@ def test_server_instructions_tell_claude_to_set_progress_alongside_every_update(
     assert "no numeric target" in instructions.lower()
 
 
-def test_server_instructions_tell_claude_to_suggest_todos_on_goal_creation():
-    # AC4: instructions must direct the LLM to suggest 3-5 subgoal-style
-    # todos whenever it creates a goal, populating the new `todos` argument.
+def test_server_instructions_tell_claude_to_create_goal_first_then_discuss_todos():
+    # AC4: instructions must direct the LLM to create the goal first with no
+    # todos, then discuss next steps with the user before adding any via create_todo.
     instructions = mcp_server.mcp.instructions
 
-    assert "3-5" in instructions
-    assert "todo" in instructions.lower()
+    assert "no todos" in instructions.lower() or "without todos" in instructions.lower() or "first with no todos" in instructions.lower()
+    assert "create_todo" in instructions
     assert "create a goal" in instructions.lower() or "create_goal" in instructions.lower()
 
 
@@ -1585,15 +1585,15 @@ def test_server_instructions_tell_claude_to_use_todo_crud_tools_conversationally
         assert tool_name in instructions
 
 
-def test_create_goal_tool_description_instructs_suggesting_todos_at_creation():
-    # AC4 (alternate location): the create_goal tool description itself
-    # also carries the suggest-3-5-todos instruction.
+def test_create_goal_tool_description_instructs_no_todos_at_creation():
+    # AC4 (alternate location): the create_goal tool description must say
+    # not to include todos in the call — create the goal first, then discuss.
     tool = mcp_server.mcp._tool_manager._tools["create_goal"]
 
     description = tool.description.lower()
 
-    assert "3-5" in description
-    assert "todo" in description
+    assert "do not include" in description or "no todos" in description or "first" in description
+    assert "create_todo" in description
 
 
 def test_coach_prompt_is_registered_and_not_auto_invoked():

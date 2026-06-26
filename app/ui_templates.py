@@ -278,19 +278,38 @@ body {
 .update-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   margin-bottom: 24px;
+  padding-left: 8px;
 }
 .update-item {
-  background: #ffffff;
-  border: 1px solid #ece3d8;
-  border-radius: 12px;
-  padding: 12px 16px;
+  display: flex;
+  gap: 14px;
+  position: relative;
+}
+.update-item:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 18px;
+  bottom: -12px;
+  width: 2px;
+  background: #ece3d8;
+}
+.update-dot {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #416352;
+  margin-top: 3px;
+}
+.update-body {
+  padding-bottom: 20px;
 }
 .update-content {
   font-size: 13px;
   color: #1f1b17;
-  margin: 0 0 4px;
+  margin: 0 0 3px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -338,6 +357,22 @@ body {
 .todo-text.todo-done {
   color: #a39a8f;
   text-decoration: line-through;
+}
+.todo-delete {
+  flex-shrink: 0;
+  margin-left: auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  color: #c0b5aa;
+  font-size: 15px;
+  line-height: 1;
+  border-radius: 6px;
+}
+.todo-delete:hover {
+  color: #c0392b;
+  background: #fdf0ee;
 }
 .action-list {
   display: flex;
@@ -613,8 +648,10 @@ function renderGoalDetailView(data) {
     for (var i = 0; i < data.recentUpdates.length; i++) {
       var u = data.recentUpdates[i];
       var safeContent = escapeHtml(u.content);
-      html += '<div class="update-item"><p class="update-content">' + safeContent + '</p>' +
-        '<span class="update-date">' + escapeHtml(formatDate(u.createdAt)) + '</span></div>';
+      html += '<div class="update-item">' +
+        '<div class="update-dot"></div>' +
+        '<div class="update-body"><p class="update-content">' + safeContent + '</p>' +
+        '<span class="update-date">' + escapeHtml(formatDate(u.createdAt)) + '</span></div></div>';
     }
     html += '</div>';
   } else {
@@ -635,10 +672,11 @@ function todoItem(t) {
   var safeText = escapeHtml(t.text);
   var checkedAttr = t.done ? ' checked' : '';
   var textClass = t.done ? ' todo-done' : '';
-  return '<div class="todo-item">' +
+  return '<div class="todo-item" id="todo-item-' + safeId + '">' +
     '<input class="todo-checkbox" type="checkbox" id="todo-checkbox-' + safeId + '"' + checkedAttr +
     ' onchange="toggleTodo(\\'' + safeId + '\\')">' +
-    '<span class="todo-text' + textClass + '" id="todo-text-' + safeId + '">' + safeText + '</span></div>';
+    '<span class="todo-text' + textClass + '" id="todo-text-' + safeId + '">' + safeText + '</span>' +
+    '<button class="todo-delete" type="button" title="Delete" onclick="deleteTodo(\\'' + safeId + '\\')">&#x2715;</button></div>';
 }
 
 function toggleTodo(todoId) {
@@ -655,6 +693,17 @@ function toggleTodo(todoId) {
       if (d.done) text.classList.add("todo-done");
       else text.classList.remove("todo-done");
     }
+  });
+}
+
+function deleteTodo(todoId) {
+  var btn = document.querySelector('#todo-item-' + todoId + ' .todo-delete');
+  if (btn) btn.disabled = true;
+  window.callTool("delete_todo", { todo_id: todoId }).then(function() {
+    var item = document.getElementById("todo-item-" + todoId);
+    if (item) item.remove();
+  }).catch(function() {
+    if (btn) btn.disabled = false;
   });
 }
 
